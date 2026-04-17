@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "OIC Integration Viewer",
+  "version": "1.0.0",
+  "description": "Alternate viewer for Oracle Integration Cloud integration blueprints with interactive tree, search, filter, and export",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": ["*://*.oraclecloud.com/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.oraclecloud.com/*"],
+      "js": ["jszip.min.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content.css"],
+      "matches": ["*://*.oraclecloud.com/*"]
+    }
+  ]
+}
