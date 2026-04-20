@@ -42,7 +42,11 @@
       STITCH: '#9ca3af',
       ACTIVITY_STREAM_LOGGER: '#6b7280',
       GLOBAL_VARIABLE: '#6b7280',
-      ORCHESTRATION: '#0891b2'
+      ORCHESTRATION: '#0891b2',
+      FOR_EACH: '#0e7490',
+      WHILE: '#0e7490',
+      WAIT: '#ca8a04',
+      STOP: '#6b7280'
     },
     dark: {
       RECEIVE: '#60a5fa',
@@ -65,7 +69,11 @@
       STITCH: '#6b7280',
       ACTIVITY_STREAM_LOGGER: '#94a3b8',
       GLOBAL_VARIABLE: '#94a3b8',
-      ORCHESTRATION: '#22d3ee'
+      ORCHESTRATION: '#22d3ee',
+      FOR_EACH: '#22d3ee',
+      WHILE: '#22d3ee',
+      WAIT: '#facc15',
+      STOP: '#6b7280'
     },
     'high-contrast': {
       RECEIVE: '#60a5fa',
@@ -88,7 +96,11 @@
       STITCH: '#a3a3a3',
       ACTIVITY_STREAM_LOGGER: '#d4d4d4',
       GLOBAL_VARIABLE: '#d4d4d4',
-      ORCHESTRATION: '#67e8f9'
+      ORCHESTRATION: '#67e8f9',
+      FOR_EACH: '#67e8f9',
+      WHILE: '#67e8f9',
+      WAIT: '#fde047',
+      STOP: '#a3a3a3'
     },
     solarized: {
       RECEIVE: '#268bd2',
@@ -111,7 +123,11 @@
       STITCH: '#657b83',
       ACTIVITY_STREAM_LOGGER: '#839496',
       GLOBAL_VARIABLE: '#839496',
-      ORCHESTRATION: '#2aa198'
+      ORCHESTRATION: '#2aa198',
+      FOR_EACH: '#2aa198',
+      WHILE: '#2aa198',
+      WAIT: '#b58900',
+      STOP: '#657b83'
     }
   };
 
@@ -136,11 +152,19 @@
     STITCH: 'STITCH',
     ACTIVITY_STREAM_LOGGER: 'LOG',
     GLOBAL_VARIABLE: 'VAR',
-    ORCHESTRATION: 'ORCH'
+    ORCHESTRATION: 'ORCH',
+    FOR_EACH: 'FOR-EACH',
+    WHILE: 'WHILE',
+    WAIT: 'WAIT',
+    STOP: 'STOP'
   };
 
   /* ── Active type filters ────────────────────────────────────────────── */
   var activeTypeFilters = new Set();
+
+  /* ── Search match navigation state ──────────────────────────────────── */
+  var searchMatches = [];       // Array of DOM .iv-node elements currently matching
+  var searchCurrentIdx = -1;    // -1 means no active focus
 
   /* ── Utility ────────────────────────────────────────────────────────── */
 
@@ -219,6 +243,52 @@
 
   function sanitizeFilename(s) { return (s || '').replace(/[^a-zA-Z0-9_.-]/g, '_'); }
 
+  // Copy text to clipboard with a brief visual confirmation on the source button.
+  function copyToClipboard(text, srcBtn) {
+    function flash(ok) {
+      if (!srcBtn) return;
+      var orig = srcBtn.textContent;
+      var origTitle = srcBtn.title;
+      srcBtn.textContent = ok ? '✓' : '✕';
+      srcBtn.title = ok ? 'Copied' : 'Copy failed';
+      setTimeout(function () { srcBtn.textContent = orig; srcBtn.title = origTitle; }, 1200);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { flash(true); }, function () { fallback(); });
+    } else {
+      fallback();
+    }
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok);
+      } catch (e) {
+        flash(false);
+      }
+    }
+  }
+
+  // Download a text payload as a file. path may include directories; only the
+  // last segment is used as the filename after sanitization.
+  function downloadText(text, path) {
+    var parts = String(path || 'file').split('/');
+    var name = sanitizeFilename(parts[parts.length - 1] || 'file');
+    var blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function debounce(fn, ms) {
     var timer;
     return function () {
@@ -261,6 +331,106 @@
       if (key) result[key] = value;
     }
     return result;
+  }
+
+  // Detect nxsdmetadata.properties entries (JSON, despite the extension) and
+  // explode embedded user-uploaded samples and derived schemas into synthetic
+  // file entries so they appear in the UI like regular archive files.
+  function extractNxsdSamples(detail) {
+    if (!detail || !detail.files) return;
+    var paths = Object.keys(detail.files);
+    for (var i = 0; i < paths.length; i++) {
+      var p = paths[i];
+      if (!/nxsdmetadata\.properties$/i.test(p)) continue;
+      var raw = detail.files[p];
+      if (!raw) continue;
+      var meta;
+      try { meta = JSON.parse(raw); } catch (e) { continue; }
+      if (!meta || typeof meta !== 'object') continue;
+
+      var dir = p.replace(/\/[^\/]+$/, '/');
+      var fileName = (meta.SELECT_SCHEMA_FILE_NAME || '').trim() || 'sample';
+      var baseName = fileName.replace(/\.[^./]+$/, '');
+
+      if (meta.SEL_SCHEMA_FILE_KEY) {
+        detail.files[dir + 'uploaded-sample/' + fileName] = String(meta.SEL_SCHEMA_FILE_KEY);
+      }
+      if (meta.SELECT_SCHEMA_FILE_OBJECT) {
+        detail.files[dir + 'derived-schema/' + baseName + '.xsd'] = String(meta.SELECT_SCHEMA_FILE_OBJECT);
+      }
+      // Keep the few metadata scalars on the detail for quick display
+      if (!detail.nxsd) detail.nxsd = {};
+      if (meta.SELECT_SCHEMA_FILE_NAME) detail.nxsd.fileName = meta.SELECT_SCHEMA_FILE_NAME;
+      if (meta.SELECT_SCHEMA_ROOT_ELEMENT) detail.nxsd.rootElement = meta.SELECT_SCHEMA_ROOT_ELEMENT;
+      if (meta.SCHEMA_OPTION_TYPE_KEY) detail.nxsd.schemaType = meta.SCHEMA_OPTION_TYPE_KEY;
+    }
+  }
+
+  // Decode the XML/HTML entities used inside .jca attribute values.
+  function decodeHtmlEntities(s) {
+    if (!s) return '';
+    return s
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#x([0-9a-fA-F]+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 16)); })
+      .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(parseInt(n, 10)); })
+      .replace(/&amp;/g, '&');
+  }
+
+  // Extract one <property name="X" value="..."> value from a .jca XML blob.
+  function extractJcaProperty(xmlContent, propName) {
+    var re = new RegExp('<property\\s+name="' + propName + '"\\s+value="([^"]*)"');
+    var m = xmlContent.match(re);
+    return m ? decodeHtmlEntities(m[1]) : '';
+  }
+
+  function pickSampleExtension(mediaType, sample) {
+    if (mediaType) {
+      if (/json/i.test(mediaType)) return 'json';
+      if (/xml/i.test(mediaType)) return 'xml';
+    }
+    var trimmed = (sample || '').replace(/^\s+/, '');
+    if (trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') return 'json';
+    if (trimmed.charAt(0) === '<') return 'xml';
+    return 'txt';
+  }
+
+  function prettifyIfJson(text, ext) {
+    if (ext !== 'json' || !text) return text;
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch (e) { return text; }
+  }
+
+  // Detect inline Request/Response samples in .jca adapter configs and
+  // explode them into synthetic file entries so they appear in the UI.
+  function extractJcaSamples(detail) {
+    if (!detail || !detail.files) return;
+    var paths = Object.keys(detail.files);
+    for (var i = 0; i < paths.length; i++) {
+      var p = paths[i];
+      if (!/\.jca$/i.test(p)) continue;
+      var content = detail.files[p];
+      if (!content) continue;
+
+      var dir = p.replace(/\/[^\/]+$/, '/');
+      var baseFile = (p.split('/').pop() || '').replace(/\.jca$/i, '');
+      var endpointBase = baseFile.replace(/_REQUEST$/i, '').replace(/_RESPONSE$/i, '');
+
+      var reqMedia = extractJcaProperty(content, 'RequestMediaType');
+      var respMedia = extractJcaProperty(content, 'ResponseMediaType');
+      var reqSample = extractJcaProperty(content, 'RequestSample');
+      var respSample = extractJcaProperty(content, 'ResponseSample');
+
+      if (reqSample) {
+        var reqExt = pickSampleExtension(reqMedia, reqSample);
+        detail.files[dir + 'request-sample/' + endpointBase + '_request.' + reqExt] = prettifyIfJson(reqSample, reqExt);
+      }
+      if (respSample) {
+        var respExt = pickSampleExtension(respMedia, respSample);
+        detail.files[dir + 'response-sample/' + endpointBase + '_response.' + respExt] = prettifyIfJson(respSample, respExt);
+      }
+    }
   }
 
   // Parse archive ZIP (ArrayBuffer). Returns { projectXml: string, fileMap: {relativePath: content} }
@@ -322,6 +492,7 @@
     route: 'ROUTER_ROUTE',
     label: 'LABEL',
     receive: 'RECEIVE',
+    scheduleReceive: 'RECEIVE',
     invoke: 'INVOKE',
     transformer: 'TRANSFORMER',
     assignment: 'ASSIGNMENT',
@@ -334,7 +505,13 @@
     stageStream: 'STAGEFILE',
     stitch: 'STITCH',
     activityStreamLogger: 'ACTIVITY_STREAM_LOGGER',
-    globalVariable: 'GLOBAL_VARIABLE'
+    globalVariable: 'GLOBAL_VARIABLE',
+    for: 'FOR_EACH',
+    while: 'WHILE',
+    wait: 'WAIT',
+    scope: 'TRY',
+    stop: 'STOP',
+    ehStop: 'STOP'
   };
 
   function parseApplicationsXml(rootEl) {
@@ -571,6 +748,10 @@
               detail.expression = parseExprProperties(files[i].content);
             }
           }
+          // Extract user-uploaded sample & derived schema from nxsdmetadata.properties
+          extractNxsdSamples(detail);
+          // Extract inline request/response samples from .jca files
+          extractJcaSamples(detail);
           activity._archiveDetail = detail;
           // Lift useful fields onto the activity itself
           if (detail.expression) {
@@ -683,6 +864,26 @@
     searchInput.id = 'iv-search-input';
     searchInput.placeholder = 'Search activities…';
     searchInput.addEventListener('input', debounce(applyFilters, 200));
+    searchInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        navigateToMatch(e.shiftKey ? 'prev' : 'next');
+      }
+    });
+
+    var searchPrevBtn = document.createElement('button');
+    searchPrevBtn.id = 'iv-search-prev';
+    searchPrevBtn.className = 'iv-search-nav';
+    searchPrevBtn.textContent = '▲';
+    searchPrevBtn.title = 'Previous match (Shift+Enter)';
+    searchPrevBtn.addEventListener('click', function () { navigateToMatch('prev'); });
+
+    var searchNextBtn = document.createElement('button');
+    searchNextBtn.id = 'iv-search-next';
+    searchNextBtn.className = 'iv-search-nav';
+    searchNextBtn.textContent = '▼';
+    searchNextBtn.title = 'Next match (Enter)';
+    searchNextBtn.addEventListener('click', function () { navigateToMatch('next'); });
 
     var matchCount = document.createElement('span');
     matchCount.className = 'iv-match-count';
@@ -734,6 +935,8 @@
     progressSpan.id = 'iv-progress-span';
 
     toolbar.appendChild(searchInput);
+    toolbar.appendChild(searchPrevBtn);
+    toolbar.appendChild(searchNextBtn);
     toolbar.appendChild(matchCount);
     toolbar.appendChild(filterContainer);
     toolbar.appendChild(expandBtn);
@@ -849,14 +1052,23 @@
 
     document.body.appendChild(overlay);
 
-    // Fullscreen-button clicks inside detail bodies
+    // Fullscreen / Copy / Download button clicks inside detail bodies
     overlay.addEventListener('click', function (e) {
       var btn = e.target && e.target.closest && e.target.closest('.iv-fullscreen-btn');
       if (!btn) return;
       e.stopPropagation();
-      var pre = btn.closest('.iv-detail-row') && btn.closest('.iv-detail-row').nextElementSibling;
-      if (pre && pre.classList.contains('iv-archive-file')) {
-        openFullscreenViewer(btn.getAttribute('data-file-path') || '', pre.textContent);
+      var row = btn.closest('.iv-detail-row');
+      var pre = row && row.nextElementSibling;
+      if (!pre || !pre.classList.contains('iv-archive-file')) return;
+      var path = btn.getAttribute('data-file-path') || 'file';
+      var content = pre.textContent;
+      var action = btn.getAttribute('data-file-action');
+      if (action === 'copy') {
+        copyToClipboard(content, btn);
+      } else if (action === 'download') {
+        downloadText(content, path);
+      } else {
+        openFullscreenViewer(path, content);
       }
     });
 
@@ -917,7 +1129,21 @@
     closeBtn.addEventListener('click', closeFs);
     document.addEventListener('keydown', escHandler);
 
+    var copyBtn = document.createElement('button');
+    copyBtn.className = 'iv-fs-action';
+    copyBtn.textContent = '📋 Copy';
+    copyBtn.title = 'Copy content to clipboard';
+    copyBtn.addEventListener('click', function () { copyToClipboard(content, copyBtn); });
+
+    var dlBtn = document.createElement('button');
+    dlBtn.className = 'iv-fs-action';
+    dlBtn.textContent = '⬇ Download';
+    dlBtn.title = 'Download as file';
+    dlBtn.addEventListener('click', function () { downloadText(content, path); });
+
     header.appendChild(title);
+    header.appendChild(copyBtn);
+    header.appendChild(dlBtn);
     header.appendChild(closeBtn);
     fs.appendChild(header);
     fs.appendChild(body);
@@ -1016,6 +1242,10 @@
           activities: faultChildren
         });
       }
+    } else if (type === 'FOR_EACH' || type === 'WHILE') {
+      // Loop containers — children are their activities
+      var loopActs = activity.activities || [];
+      loopActs.forEach(function (a) { children.push(a); });
     } else if (type === 'ROUTER') {
       var routes = activity.routes || activity.routerRoutes || [];
       routes.forEach(function (r) { children.push(r); });
@@ -1125,6 +1355,11 @@
         if (e.XpathExpression) addRow('XPath', e.XpathExpression);
         if (e.VariableType) addRow('Var Type', e.VariableType);
       }
+      if (ad.nxsd) {
+        if (ad.nxsd.fileName) addRow('Sample File', ad.nxsd.fileName);
+        if (ad.nxsd.rootElement) addRow('Root Element', ad.nxsd.rootElement);
+        if (ad.nxsd.schemaType) addRow('Schema Type', ad.nxsd.schemaType);
+      }
       if (ad.files) {
         var paths = Object.keys(ad.files);
         for (var fi = 0; fi < paths.length; fi++) {
@@ -1134,6 +1369,8 @@
             '<div class="iv-detail-row">' +
             '<span class="iv-detail-label">File</span>' +
             '<span class="iv-detail-value">' + escapeHtml(p) + '</span>' +
+            '<button class="iv-fullscreen-btn iv-file-action" title="Copy to clipboard" data-file-action="copy" data-file-path="' + escapeHtml(p) + '">📋</button>' +
+            '<button class="iv-fullscreen-btn iv-file-action" title="Download file" data-file-action="download" data-file-path="' + escapeHtml(p) + '">⬇</button>' +
             '<button class="iv-fullscreen-btn" title="Fullscreen" data-file-path="' + escapeHtml(p) + '">⛶</button>' +
             '</div>' +
             '<pre class="iv-archive-file">' + escapeHtml(content) + '</pre>'
@@ -1209,6 +1446,8 @@
         if (xp) detailText = '= ' + truncateXpath(xp);
       } else if (activity.type === 'ROUTER_ROUTE') {
         detailText = xp ? 'IF ' + truncateXpath(xp) : 'OTHERWISE';
+      } else if (activity.type === 'FOR_EACH' || activity.type === 'WHILE') {
+        if (xp) detailText = truncateXpath(xp);
       } else if (activity.type === 'THROW') {
         if (xp) detailText = 'IF NOT ' + truncateXpath(xp);
       } else if (activity.type === 'INVOKE' || activity.type === 'RECEIVE' || activity.type === 'REPLY') {
@@ -1429,11 +1668,12 @@
   function applyFilters() {
     var searchInput = document.getElementById('iv-search-input');
     var searchText = searchInput ? searchInput.value.trim().toLowerCase() : '';
-    var matchCountEl = document.getElementById('iv-match-count');
     var tc = document.getElementById('iv-tree-container');
     if (!tc) return;
 
-    var matchCount = 0;
+    // Reset match nav state — rebuild in document order
+    searchMatches = [];
+    searchCurrentIdx = -1;
 
     function filterNode(nodeEl) {
       var type = nodeEl._effectiveType || nodeEl._type || '';
@@ -1445,6 +1685,14 @@
 
       // Check text search
       var textPass = !searchText || searchable.indexOf(searchText) !== -1;
+
+      var selfMatch = typePass && textPass;
+      var textHit = searchText && searchable.indexOf(searchText) !== -1;
+
+      // Record this node's slot BEFORE recursing so matches follow document order
+      if (selfMatch && textHit) {
+        searchMatches.push(nodeEl);
+      }
 
       // Recursively check children
       var childContainer = nodeEl.querySelector(':scope > .iv-children');
@@ -1458,13 +1706,8 @@
         }
       }
 
-      var selfMatch = typePass && textPass;
       var visible = selfMatch || anyChildVisible;
       nodeEl.classList.toggle('iv-hidden', !visible);
-
-      if (selfMatch && searchText && searchable.indexOf(searchText) !== -1) {
-        matchCount++;
-      }
 
       return visible;
     }
@@ -1482,9 +1725,84 @@
       highlightMatches(tc, searchText);
     }
 
-    if (matchCountEl) {
-      matchCountEl.textContent = searchText ? matchCount + ' match' + (matchCount !== 1 ? 'es' : '') : '';
+    // Clear any stale current-match marker
+    var prevMark = tc.querySelector('.iv-node-header.iv-current-match');
+    if (prevMark) prevMark.classList.remove('iv-current-match');
+
+    // Auto-focus first match so Enter-less "type & see" is obvious
+    if (searchText && searchMatches.length > 0) {
+      searchCurrentIdx = 0;
+      focusCurrentMatch(false);
     }
+
+    updateMatchCounter();
+  }
+
+  function updateMatchCounter() {
+    var matchCountEl = document.getElementById('iv-match-count');
+    if (!matchCountEl) return;
+    var total = searchMatches.length;
+    if (total === 0) {
+      var si = document.getElementById('iv-search-input');
+      var q = si ? si.value.trim() : '';
+      matchCountEl.textContent = q ? '0 matches' : '';
+    } else if (searchCurrentIdx >= 0) {
+      matchCountEl.textContent = (searchCurrentIdx + 1) + ' / ' + total;
+    } else {
+      matchCountEl.textContent = total + ' match' + (total !== 1 ? 'es' : '');
+    }
+    var prev = document.getElementById('iv-search-prev');
+    var next = document.getElementById('iv-search-next');
+    if (prev) prev.disabled = total === 0;
+    if (next) next.disabled = total === 0;
+  }
+
+  // Expand every ancestor .iv-children container so the target node becomes visible
+  function expandAncestorsOf(nodeEl) {
+    var parent = nodeEl.parentNode;
+    while (parent && parent.id !== 'iv-tree-container') {
+      if (parent.classList && parent.classList.contains('iv-children')) {
+        parent.style.display = 'block';
+        // Flip sibling toggle glyph on the owning node's header
+        var ownerNode = parent.parentNode;
+        if (ownerNode) {
+          var tog = ownerNode.querySelector(':scope > .iv-node-header > .iv-toggle');
+          if (tog && !tog.classList.contains('iv-leaf')) tog.textContent = '▼';
+        }
+      }
+      parent = parent.parentNode;
+    }
+  }
+
+  function focusCurrentMatch(smoothScroll) {
+    if (searchCurrentIdx < 0 || searchCurrentIdx >= searchMatches.length) return;
+    var tc = document.getElementById('iv-tree-container');
+    if (!tc) return;
+
+    // Remove previous marker
+    var prev = tc.querySelector('.iv-node-header.iv-current-match');
+    if (prev) prev.classList.remove('iv-current-match');
+
+    var nodeEl = searchMatches[searchCurrentIdx];
+    expandAncestorsOf(nodeEl);
+    var header = nodeEl.querySelector(':scope > .iv-node-header');
+    if (header) {
+      header.classList.add('iv-current-match');
+      header.scrollIntoView({ behavior: smoothScroll ? 'smooth' : 'auto', block: 'center' });
+    }
+  }
+
+  function navigateToMatch(direction) {
+    if (searchMatches.length === 0) return;
+    if (searchCurrentIdx < 0) {
+      searchCurrentIdx = direction === 'prev' ? searchMatches.length - 1 : 0;
+    } else if (direction === 'next') {
+      searchCurrentIdx = (searchCurrentIdx + 1) % searchMatches.length;
+    } else {
+      searchCurrentIdx = (searchCurrentIdx - 1 + searchMatches.length) % searchMatches.length;
+    }
+    focusCurrentMatch(true);
+    updateMatchCounter();
   }
 
   function highlightMatches(container, searchText) {
@@ -1774,11 +2092,16 @@
       '      if (ad.expression.XpathExpression) addRow("XPath", ad.expression.XpathExpression);\n' +
       '      if (ad.expression.VariableType) addRow("Var Type", ad.expression.VariableType);\n' +
       '    }\n' +
+      '    if (ad.nxsd) {\n' +
+      '      if (ad.nxsd.fileName) addRow("Sample File", ad.nxsd.fileName);\n' +
+      '      if (ad.nxsd.rootElement) addRow("Root Element", ad.nxsd.rootElement);\n' +
+      '      if (ad.nxsd.schemaType) addRow("Schema Type", ad.nxsd.schemaType);\n' +
+      '    }\n' +
       '    if (ad.files) {\n' +
       '      var paths = Object.keys(ad.files);\n' +
       '      for (var fi = 0; fi < paths.length; fi++) {\n' +
       '        var p = paths[fi]; var content = ad.files[p];\n' +
-      '        rows.push("<div class=\\"iv-detail-row\\"><span class=\\"iv-detail-label\\">File</span><span class=\\"iv-detail-value\\">" + escapeHtml(p) + "</span><button class=\\"iv-fullscreen-btn\\" title=\\"Fullscreen\\" data-file-path=\\"" + escapeHtml(p) + "\\">\u26F6</button></div><pre class=\\"iv-archive-file\\">" + escapeHtml(content) + "</pre>");\n' +
+      '        rows.push("<div class=\\"iv-detail-row\\"><span class=\\"iv-detail-label\\">File</span><span class=\\"iv-detail-value\\">" + escapeHtml(p) + "</span><button class=\\"iv-fullscreen-btn\\" title=\\"Copy to clipboard\\" data-file-action=\\"copy\\" data-file-path=\\"" + escapeHtml(p) + "\\">\ud83d\udccb</button><button class=\\"iv-fullscreen-btn\\" title=\\"Download\\" data-file-action=\\"download\\" data-file-path=\\"" + escapeHtml(p) + "\\">\u2b07</button><button class=\\"iv-fullscreen-btn\\" title=\\"Fullscreen\\" data-file-path=\\"" + escapeHtml(p) + "\\">\u26F6</button></div><pre class=\\"iv-archive-file\\">" + escapeHtml(content) + "</pre>");\n' +
       '      }\n' +
       '    }\n' +
       '  }\n' +
@@ -2135,9 +2458,22 @@
       '      e.stopPropagation();\n' +
       '      var row = fsBtn.closest(".iv-detail-row");\n' +
       '      var pre = row && row.nextElementSibling;\n' +
-      '      if (pre && pre.classList.contains("iv-archive-file")) openFullscreenViewer(fsBtn.getAttribute("data-file-path") || "", pre.textContent);\n' +
+      '      if (!pre || !pre.classList.contains("iv-archive-file")) return;\n' +
+      '      var path = fsBtn.getAttribute("data-file-path") || "file";\n' +
+      '      var content = pre.textContent;\n' +
+      '      var action = fsBtn.getAttribute("data-file-action");\n' +
+      '      if (action === "copy") { copyToClipboard(content, fsBtn); }\n' +
+      '      else if (action === "download") { downloadText(content, path); }\n' +
+      '      else { openFullscreenViewer(path, content); }\n' +
       '    }\n' +
       '  });\n' +
+      '\n' +
+      '  function copyToClipboard(text, srcBtn) {\n' +
+      '    function flash(ok) { if (!srcBtn) return; var o = srcBtn.textContent, ot = srcBtn.title; srcBtn.textContent = ok ? "\u2713" : "\u2715"; srcBtn.title = ok ? "Copied" : "Copy failed"; setTimeout(function(){ srcBtn.textContent = o; srcBtn.title = ot; }, 1200); }\n' +
+      '    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(function(){flash(true);}, function(){fallback();}); } else { fallback(); }\n' +
+      '    function fallback() { try { var ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); var ok = document.execCommand("copy"); document.body.removeChild(ta); flash(ok); } catch(e) { flash(false); } }\n' +
+      '  }\n' +
+      '  function downloadText(text, path) { var parts = String(path||"file").split("/"); var name = (parts[parts.length-1]||"file").replace(/[^a-zA-Z0-9_.-]/g, "_"); var blob = new Blob([text], {type:"text/plain;charset=utf-8"}); var url = URL.createObjectURL(blob); var a = document.createElement("a"); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); }\n' +
       '\n' +
       '  function openFullscreenViewer(path, content) {\n' +
       '    var existing = document.getElementById("oic-iv-fullscreen");\n' +
@@ -2151,7 +2487,9 @@
       '    function escH(e) { if (e.key === "Escape") { e.stopPropagation(); closeFs(); } }\n' +
       '    closeBtn.addEventListener("click", closeFs);\n' +
       '    document.addEventListener("keydown", escH);\n' +
-      '    header.appendChild(title); header.appendChild(closeBtn);\n' +
+      '    var copyBtn = document.createElement("button"); copyBtn.className = "iv-fs-action"; copyBtn.textContent = "\ud83d\udccb Copy"; copyBtn.title = "Copy to clipboard"; copyBtn.addEventListener("click", function(){ copyToClipboard(content, copyBtn); });\n' +
+      '    var dlBtn = document.createElement("button"); dlBtn.className = "iv-fs-action"; dlBtn.textContent = "\u2b07 Download"; dlBtn.title = "Download as file"; dlBtn.addEventListener("click", function(){ downloadText(content, path); });\n' +
+      '    header.appendChild(title); header.appendChild(copyBtn); header.appendChild(dlBtn); header.appendChild(closeBtn);\n' +
       '    fs.appendChild(header); fs.appendChild(body);\n' +
       '    document.body.appendChild(fs);\n' +
       '  }\n' +
@@ -2635,6 +2973,9 @@
         faults: (activity.catches || []).slice().concat(activity.catchAll ? [activity.catchAll] : [])
       };
     }
+    if (t === 'FOR_EACH' || t === 'WHILE') {
+      return { main: (activity.activities || []).slice() };
+    }
     if (t === 'ROUTER') {
       return { routes: (activity.routes || activity.routerRoutes || []).slice() };
     }
@@ -2680,18 +3021,46 @@
     while (i > 0) { out.unshift({ op: 'removed', left: leftArr[i - 1] }); i--; }
     while (j > 0) { out.unshift({ op: 'added', right: rightArr[j - 1] }); j--; }
 
-    // Safety net: collapse adjacent removed+added of the same type into a match.
-    // Covers single renames at a position (e.g. LABEL initVars → LABEL initializeVars).
-    for (var k = 0; k < out.length - 1; k++) {
-      var a = out[k], b = out[k + 1];
-      if (a.op === 'removed' && b.op === 'added' && a.left && b.right && a.left.type === b.right.type) {
-        out[k] = { op: 'match', left: a.left, right: b.right };
-        out.splice(k + 1, 1);
-      } else if (a.op === 'added' && b.op === 'removed' && a.right && b.left && a.right.type === b.left.type) {
-        out[k] = { op: 'match', left: b.left, right: a.right };
-        out.splice(k + 1, 1);
+    // Safety net: pair up unmatched elements of the same type sequentially.
+    // This correctly aligns renames (where type is identical but display name differs)
+    // without crossing over or mismatching based on reverse output order.
+    var unmatchedLeft = [];
+    var unmatchedRight = [];
+    var result = [];
+    
+    function flushUnmatched() {
+      var li = 0, ri = 0;
+      while (li < unmatchedLeft.length || ri < unmatchedRight.length) {
+        if (li < unmatchedLeft.length && ri < unmatchedRight.length && unmatchedLeft[li].type === unmatchedRight[ri].type) {
+          result.push({ op: 'match', left: unmatchedLeft[li], right: unmatchedRight[ri] });
+          li++; ri++;
+        } else if (li < unmatchedLeft.length && ri < unmatchedRight.length) {
+          result.push({ op: 'removed', left: unmatchedLeft[li] });
+          li++;
+        } else if (li < unmatchedLeft.length) {
+          result.push({ op: 'removed', left: unmatchedLeft[li] });
+          li++;
+        } else {
+          result.push({ op: 'added', right: unmatchedRight[ri] });
+          ri++;
+        }
+      }
+      unmatchedLeft.length = 0;
+      unmatchedRight.length = 0;
+    }
+
+    for (var k = 0; k < out.length; k++) {
+      if (out[k].op === 'match') {
+        flushUnmatched();
+        result.push(out[k]);
+      } else if (out[k].op === 'removed') {
+        unmatchedLeft.push(out[k].left);
+      } else if (out[k].op === 'added') {
+        unmatchedRight.push(out[k].right);
       }
     }
+    flushUnmatched();
+    out = result;
     return out;
   }
 
@@ -2928,6 +3297,10 @@
           var xp = rxp || lxp;
           detailText = xp ? 'IF ' + truncateXpath(xp) : 'OTHERWISE';
         }
+      } else if (primary.type === 'FOR_EACH' || primary.type === 'WHILE') {
+        if (dn.status === 'modified' && lxp && rxp && lxp !== rxp) {
+          detailText = truncateXpath(lxp) + '  →  ' + truncateXpath(rxp);
+        } else if (rxp || lxp) detailText = truncateXpath(rxp || lxp);
       } else if (primary.type === 'THROW') {
         var x = rxp || lxp;
         if (x) detailText = 'IF NOT ' + truncateXpath(x);
@@ -3072,6 +3445,26 @@
         var pathSpan = document.createElement('span');
         pathSpan.className = 'iv-cmp-file-path';
         pathSpan.textContent = f.path;
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'iv-cmp-fullscreen-btn';
+        copyBtn.textContent = '📋';
+        copyBtn.title = 'Copy to clipboard' + (f.status === 'modified' ? ' (right side)' : '');
+        copyBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var text = f.rightContent != null ? f.rightContent : f.leftContent || '';
+          copyToClipboard(text, copyBtn);
+        });
+
+        var dlBtn = document.createElement('button');
+        dlBtn.className = 'iv-cmp-fullscreen-btn';
+        dlBtn.textContent = '⬇';
+        dlBtn.title = 'Download file' + (f.status === 'modified' ? ' (right side)' : '');
+        dlBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var text = f.rightContent != null ? f.rightContent : f.leftContent || '';
+          downloadText(text, f.path);
+        });
+
         var fsBtn = document.createElement('button');
         fsBtn.className = 'iv-cmp-fullscreen-btn';
         fsBtn.textContent = '⛶';
@@ -3082,6 +3475,8 @@
         });
         fRow.appendChild(badge);
         fRow.appendChild(pathSpan);
+        fRow.appendChild(copyBtn);
+        fRow.appendChild(dlBtn);
         fRow.appendChild(fsBtn);
         body.appendChild(fRow);
 
@@ -3136,7 +3531,28 @@
     function closeFs() { document.removeEventListener('keydown', fsEsc); fs.remove(); }
     closeBtn.addEventListener('click', closeFs);
     document.addEventListener('keydown', fsEsc);
+
     header.appendChild(title);
+
+    function addActionButton(label, titleText, handler) {
+      var b = document.createElement('button');
+      b.className = 'iv-fs-action';
+      b.textContent = label;
+      b.title = titleText;
+      b.addEventListener('click', handler);
+      header.appendChild(b);
+    }
+    if (fileDiff.status === 'modified') {
+      addActionButton('📋 L', 'Copy left content', function () { copyToClipboard(fileDiff.leftContent || '', this); });
+      addActionButton('📋 R', 'Copy right content', function () { copyToClipboard(fileDiff.rightContent || '', this); });
+      addActionButton('⬇ L', 'Download left', function () { downloadText(fileDiff.leftContent || '', fileDiff.path + '.left'); });
+      addActionButton('⬇ R', 'Download right', function () { downloadText(fileDiff.rightContent || '', fileDiff.path + '.right'); });
+    } else {
+      var fsContent = fileDiff.rightContent != null ? fileDiff.rightContent : (fileDiff.leftContent || '');
+      addActionButton('📋 Copy', 'Copy to clipboard', function () { copyToClipboard(fsContent, this); });
+      addActionButton('⬇ Download', 'Download as file', function () { downloadText(fsContent, fileDiff.path); });
+    }
+
     header.appendChild(closeBtn);
     fs.appendChild(header);
 
@@ -3378,5 +3794,12 @@
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  // Expose hook for standalone mode (no-op in extension context)
+  window.__oicIV = {
+    loadArchiveFromFile: loadArchiveFromFile,
+    openEmptyViewer: openEmptyViewer,
+    openViewerWithData: openViewerWithData
+  };
 
 })();

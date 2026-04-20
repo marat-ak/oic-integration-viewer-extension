@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>OIC Integration Viewer — Standalone</title>
+<link rel="stylesheet" href="content.css">
+<style>
+  body { margin: 0; padding: 0; background: #1e293b; }
+  #oic-iv-overlay {
+    position: relative !important;
+    width: 100% !important;
+    height: 100vh !important;
+    z-index: auto !important;
+  }
+</style>
+</head>
+<body>
+<script>
+  // Stub chrome API — capture the message listener so we can invoke it
+  var _chromeListeners = [];
+  window.chrome = {
+    runtime: {
+      onMessage: {
+        addListener: function(fn) { _chromeListeners.push(fn); }
+      },
+      lastError: null
+    },
+    storage: {
+      local: {
+        get: function(keys, cb) { if (cb) cb({}); },
+        set: function() {}
+      }
+    }
+  };
+</script>
+<script src="jszip.min.js"></script>
+<script src="content.js"></script>
+<script>
+  // Open the viewer
+  if (window.__oicIV) {
+    window.__oicIV.openEmptyViewer();
+  }
+</script>
+</body>
+</html>

@@ -649,6 +649,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+#oic-iv-fullscreen .iv-fs-action {
+  background: rgba(255,255,255,0.12);
+  color: #e2e8f0;
+  border: 1px solid rgba(255,255,255,0.2);
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-right: 4px;
+}
+#oic-iv-fullscreen .iv-fs-action:hover {
+  background: rgba(255,255,255,0.22);
+}
+
 #oic-iv-fullscreen .iv-fs-close {
   background: #dc2626;
   color: white;
@@ -750,6 +764,24 @@
   color: var(--iv-highlight-text);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* Currently focused match (from prev/next navigation) */
+#oic-iv-overlay .iv-node-header.iv-current-match {
+  outline: 2px solid var(--iv-accent);
+  outline-offset: -2px;
+  background: var(--iv-node-hover);
+}
+
+/* Search prev/next buttons */
+#oic-iv-overlay .iv-toolbar button.iv-search-nav {
+  padding: 4px 8px;
+  font-size: 11px;
+  min-width: 28px;
+}
+#oic-iv-overlay .iv-toolbar button.iv-search-nav:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* Hidden (filtered out) */
