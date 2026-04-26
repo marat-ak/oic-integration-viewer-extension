@@ -714,19 +714,29 @@
     };
   }
 
-  // Given a refUri like "processor_211" or "application_41/outbound_42/output_49",
-  // return all archive files whose path starts with the folder (ignoring trailing segment for applications)
-  function getArchiveFilesForRefUri(fileMap, refUri) {
+  // Given a refUri and activity type, return archive files belonging to that activity.
+  //   application_41/outbound_42/output_49 → strip trailing output/input/fault (adapter files live one level up)
+  //   processor_211/output_212              → exact subtree (ROUTE uses its own output folder)
+  //   processor_211 with type=ROUTER        → only files NOT inside output_/input_/fault_ subfolders
+  //                                           (those belong to child ROUTER_ROUTEs)
+  //   processor_211 (other types)           → full subtree
+  function getArchiveFilesForRefUri(fileMap, refUri, activityType) {
     if (!refUri) return [];
-    // Strip trailing output_XX / input_XX segment for application refs
-    var folder = refUri.replace(/\/(output|input|fault)_\d+$/, '');
+    var folder = refUri;
+    if (/^application_/.test(refUri)) {
+      folder = refUri.replace(/\/(output|input|fault)_\d+$/, '');
+    }
+    var excludeRouteSubfolders = activityType === 'ROUTER';
     var result = [];
     var keys = Object.keys(fileMap);
     for (var i = 0; i < keys.length; i++) {
       var p = keys[i];
-      if (p === folder || p.indexOf(folder + '/') === 0) {
-        result.push({ path: p, content: fileMap[p] });
+      if (p !== folder && p.indexOf(folder + '/') !== 0) continue;
+      if (excludeRouteSubfolders) {
+        var rel = p.substring(folder.length + 1);
+        if (/^(output|input|fault)_\d+(\/|$)/.test(rel)) continue;
       }
+      result.push({ path: p, content: fileMap[p] });
     }
     return result;
   }
@@ -738,7 +748,7 @@
       if (!activity || typeof activity !== 'object') return;
 
       if (activity.refUri) {
-        var files = getArchiveFilesForRefUri(fileMap, activity.refUri);
+        var files = getArchiveFilesForRefUri(fileMap, activity.refUri, activity.type);
         if (files.length > 0) {
           var detail = { files: {} };
           for (var i = 0; i < files.length; i++) {
@@ -760,6 +770,10 @@
             }
             if (detail.expression.VariableDescription && !activity.variableDescription) {
               activity.variableDescription = detail.expression.VariableDescription;
+            }
+            // ROUTER_ROUTE: lift ExpressionName as the route's display name (e.g. "ValidateRegion", "Otherwise")
+            if (activity.type === 'ROUTER_ROUTE' && detail.expression.ExpressionName && !activity.name) {
+              activity.name = detail.expression.ExpressionName;
             }
           }
           // TRANSFORMER: parse mapTargets from XSL to get target name
@@ -1208,8 +1222,7 @@
       return 'Switch ' + name;
     }
     if (t === 'ROUTER_ROUTE') {
-      var xp = getActivityXpath(activity);
-      return xp ? 'Route: IF ' + truncateXpath(xp) : 'Route: OTHERWISE';
+      return 'Route ' + (activity.name || activity.id || '');
     }
     return name;
   }
@@ -2648,6 +2661,7 @@
   var cmpRight = null;       // { blueprint, label }
   var cmpDiffRoot = null;    // the root DiffNode
   var cmpShowOnlyChanges = true;
+  var cmpViewMode = 'tree'; // 'tree' | 'table'
   var cmpOnKeyDown = null;
 
   function openCompareOverlay(initialLeftBlueprint) {
@@ -2683,6 +2697,7 @@
   }
 
   function createCompareOverlay() {
+    cmpViewMode = 'tree';
     cmpOverlay = document.createElement('div');
     cmpOverlay.id = 'oic-iv-compare-overlay';
     cmpOverlay.setAttribute('data-theme', currentTheme);
@@ -2707,7 +2722,7 @@
       currentTheme = themeSel.value;
       cmpOverlay.setAttribute('data-theme', currentTheme);
       try { chrome.storage.local.set({ ivTheme: currentTheme }); } catch (e) { }
-      renderCompareDiffTree();
+      renderCompareDiff();
     });
 
     var closeBtn = document.createElement('button');
@@ -2769,6 +2784,29 @@
     progressSpan.className = 'iv-cmp-progress';
     progressSpan.id = 'iv-cmp-progress';
 
+    var viewToggle = document.createElement('div');
+    viewToggle.className = 'iv-cmp-view-toggle';
+    var treeBtn = document.createElement('button');
+    treeBtn.className = 'iv-cmp-view-btn iv-cmp-view-btn-active';
+    treeBtn.dataset.view = 'tree';
+    treeBtn.textContent = 'Tree';
+    var tableBtn = document.createElement('button');
+    tableBtn.className = 'iv-cmp-view-btn';
+    tableBtn.dataset.view = 'table';
+    tableBtn.textContent = 'Table';
+    viewToggle.appendChild(treeBtn);
+    viewToggle.appendChild(tableBtn);
+    function setViewMode(mode) {
+      if (mode === cmpViewMode) return;
+      cmpViewMode = mode;
+      treeBtn.classList.toggle('iv-cmp-view-btn-active', mode === 'tree');
+      tableBtn.classList.toggle('iv-cmp-view-btn-active', mode === 'table');
+      renderCompareDiff();
+      applyCompareFilters();
+    }
+    treeBtn.addEventListener('click', function () { setViewMode('tree'); });
+    tableBtn.addEventListener('click', function () { setViewMode('table'); });
+
     toolbar.appendChild(searchInput);
     toolbar.appendChild(matchCount);
     toolbar.appendChild(onlyChangesLabel);
@@ -2776,6 +2814,7 @@
     toolbar.appendChild(collapseBtn);
     toolbar.appendChild(exportHtmlBtn);
     toolbar.appendChild(exportJsonBtn);
+    toolbar.appendChild(viewToggle);
     toolbar.appendChild(progressSpan);
 
     /* Tree container */
@@ -2942,8 +2981,13 @@
       return;
     }
     cmpDiffRoot = buildDiffModel(cmpLeft.blueprint, cmpRight.blueprint);
-    renderCompareDiffTree();
+    renderCompareDiff();
     applyCompareFilters();
+  }
+
+  function renderCompareDiff() {
+    if (cmpViewMode === 'table') renderCompareDiffTable();
+    else renderCompareDiffTree();
   }
 
   /* ── Matching ─────────────────────────────────────────────────────── */
@@ -3224,6 +3268,146 @@
   }
 
   /* ── Rendering ────────────────────────────────────────────────────── */
+
+  function renderCompareDiffTable() {
+    var tc = document.getElementById('iv-cmp-tree-container');
+    if (!tc) return;
+    tc.innerHTML = '';
+    if (!cmpDiffRoot) {
+      tc.innerHTML = '<div class="iv-cmp-empty">Load both sides to see a diff.</div>';
+      return;
+    }
+    var table = document.createElement('div');
+    table.className = 'iv-cmp-table';
+
+    var head = document.createElement('div');
+    head.className = 'iv-cmp-table-head';
+    var hSpacer = document.createElement('div');
+    var hLeft = document.createElement('div');
+    hLeft.className = 'iv-cmp-table-head-left';
+    hLeft.textContent = (cmpLeft && cmpLeft.label) || 'LEFT';
+    var hRight = document.createElement('div');
+    hRight.className = 'iv-cmp-table-head-right';
+    hRight.textContent = (cmpRight && cmpRight.label) || 'RIGHT';
+    head.appendChild(hSpacer);
+    head.appendChild(hLeft);
+    head.appendChild(hRight);
+    table.appendChild(head);
+
+    (cmpDiffRoot.children || []).forEach(function (c) {
+      table.appendChild(renderDiffRow(c, 0));
+    });
+    tc.appendChild(table);
+  }
+
+  function renderDiffRow(dn, depth) {
+    var row = document.createElement('div');
+    row.className = 'iv-cmp-node iv-cmp-trow iv-cmp-trow-' + dn.status + ' iv-cmp-status-' + dn.status;
+    row._diff = dn;
+
+    var hasChildren = dn.children && dn.children.length > 0;
+    var hasFieldDiffs = dn.fieldDiffs && dn.fieldDiffs.length > 0;
+    var hasFileDiffs = dn.fileDiffs && dn.fileDiffs.some(function (f) { return f.status !== 'unchanged'; });
+    var oneSidedHasArchive =
+      (dn.status === 'added' && dn.right && dn.right._archiveDetail) ||
+      (dn.status === 'removed' && dn.left && dn.left._archiveDetail);
+    var canExpand = hasChildren || hasFieldDiffs || hasFileDiffs ||
+      (dn.status !== 'unchanged' && (hasFieldDiffs || hasFileDiffs)) || oneSidedHasArchive;
+
+    var header = document.createElement('div');
+    header.className = 'iv-cmp-trow-header';
+
+    var toggle = document.createElement('span');
+    toggle.className = 'iv-cmp-toggle' + (canExpand ? '' : ' iv-cmp-leaf');
+    toggle.textContent = canExpand ? '▶' : '·';
+
+    var leftCell = buildTableCell(dn, 'left');
+    var rightCell = buildTableCell(dn, 'right');
+
+    header.appendChild(toggle);
+    header.appendChild(leftCell);
+    header.appendChild(rightCell);
+    row.appendChild(header);
+
+    if (!canExpand) return row;
+
+    var expand = document.createElement('div');
+    expand.className = 'iv-cmp-trow-expand';
+
+    var detailBuilt = false;
+    var includeDetail = hasFieldDiffs || hasFileDiffs ||
+      (dn.status !== 'unchanged' && dn.status !== 'added' && dn.status !== 'removed') ||
+      oneSidedHasArchive;
+    if (includeDetail) {
+      var body = renderDiffDetail(dn);
+      if (body) {
+        body.classList.add('iv-cmp-open');
+        expand.appendChild(body);
+        detailBuilt = true;
+      }
+    }
+
+    if (hasChildren) {
+      var nested = document.createElement('div');
+      nested.className = 'iv-cmp-table iv-cmp-nested iv-cmp-children';
+      dn.children.forEach(function (c) {
+        nested.appendChild(renderDiffRow(c, depth + 1));
+      });
+      expand.appendChild(nested);
+    }
+
+    if (!detailBuilt && !hasChildren) {
+      // Nothing to show — drop expand
+      return row;
+    }
+
+    row.appendChild(expand);
+
+    function toggleOpen() {
+      row.classList.toggle('iv-cmp-trow-open');
+      var isOpen = row.classList.contains('iv-cmp-trow-open');
+      toggle.textContent = isOpen ? '▼' : '▶';
+    }
+    toggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleOpen();
+    });
+    header.addEventListener('click', function () {
+      toggleOpen();
+    });
+
+    return row;
+  }
+
+  function buildTableCell(dn, side) {
+    var cell = document.createElement('div');
+    cell.className = 'iv-cmp-tcell iv-cmp-tcell-' + side;
+    var act = side === 'left' ? dn.left : dn.right;
+    if (!act) {
+      cell.classList.add('iv-cmp-tcell-empty');
+      cell.textContent = '—';
+      return cell;
+    }
+    var typeBadge = document.createElement('span');
+    typeBadge.className = 'iv-cmp-type-badge';
+    var effType = diffNodeEffectiveType(dn);
+    typeBadge.textContent = diffNodeDisplayType(dn);
+    typeBadge.style.background = getBadgeColor(effType);
+    cell.appendChild(typeBadge);
+
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'iv-cmp-node-name';
+    nameSpan.textContent = getActivityName(act) || '';
+    cell.appendChild(nameSpan);
+
+    if (act.adapterType) {
+      var connBadge = document.createElement('span');
+      connBadge.className = 'iv-cmp-conn-badge';
+      connBadge.textContent = act.adapterType;
+      cell.appendChild(connBadge);
+    }
+    return cell;
+  }
 
   function renderCompareDiffTree() {
     var tc = document.getElementById('iv-cmp-tree-container');
@@ -3616,12 +3800,16 @@
       if (q && txt.indexOf(q) === -1) selfPass = false;
       if (cmpShowOnlyChanges && dn.status === 'unchanged') selfPass = false;
 
-      var childContainer = nodeEl.querySelector(':scope > .iv-cmp-children');
+      var childContainer = nodeEl.querySelector(
+        ':scope > .iv-cmp-children, :scope > .iv-cmp-trow-expand > .iv-cmp-children'
+      );
       var anyChildVisible = false;
       if (childContainer) {
         for (var i = 0; i < childContainer.children.length; i++) {
           var child = childContainer.children[i];
-          if (visit(child)) anyChildVisible = true;
+          if (child.classList && child.classList.contains('iv-cmp-node')) {
+            if (visit(child)) anyChildVisible = true;
+          }
         }
       }
       var visible = selfPass || anyChildVisible;
@@ -3630,9 +3818,11 @@
       return visible;
     }
 
-    for (var i = 0; i < tc.children.length; i++) {
-      var c = tc.children[i];
-      if (c.classList.contains('iv-cmp-node')) visit(c);
+    // Top-level rows live directly under `tc` in tree mode, or under `tc > .iv-cmp-table` in table mode.
+    var topContainer = tc.querySelector(':scope > .iv-cmp-table') || tc;
+    for (var i = 0; i < topContainer.children.length; i++) {
+      var c = topContainer.children[i];
+      if (c.classList && c.classList.contains('iv-cmp-node')) visit(c);
     }
     if (matchCountEl) matchCountEl.textContent = q ? (count + ' matches') : '';
   }
@@ -3640,7 +3830,13 @@
   function compareExpandCollapseAll(expand) {
     if (!cmpOverlay) return;
     cmpOverlay.querySelectorAll('.iv-cmp-children').forEach(function (el) {
+      // Nested tables in table mode rely on the .iv-cmp-trow-open ancestor for visibility,
+      // so don't override their display style.
+      if (el.classList.contains('iv-cmp-table')) return;
       el.style.display = expand ? 'block' : 'none';
+    });
+    cmpOverlay.querySelectorAll('.iv-cmp-trow').forEach(function (el) {
+      el.classList.toggle('iv-cmp-trow-open', !!expand);
     });
     cmpOverlay.querySelectorAll('.iv-cmp-toggle').forEach(function (el) {
       if (!el.classList.contains('iv-cmp-leaf')) el.textContent = expand ? '▼' : '▶';

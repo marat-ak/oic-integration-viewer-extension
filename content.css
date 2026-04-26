@@ -1462,3 +1462,133 @@
   background: rgba(133,153,0,0.15);
   color: #859900;
 }
+
+/* ──────────────────────────────────────────────────────────────────────
+   Compare overlay — Table view mode
+   ────────────────────────────────────────────────────────────────────── */
+
+#oic-iv-compare-overlay .iv-cmp-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--cmp-border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-left: 4px;
+}
+#oic-iv-compare-overlay .iv-cmp-view-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: 0;
+  color: var(--cmp-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+#oic-iv-compare-overlay .iv-cmp-view-btn + .iv-cmp-view-btn {
+  border-left: 1px solid var(--cmp-border);
+}
+#oic-iv-compare-overlay .iv-cmp-view-btn:hover {
+  background: var(--cmp-node-hover);
+}
+#oic-iv-compare-overlay .iv-cmp-view-btn-active {
+  background: var(--cmp-accent);
+  color: #ffffff;
+}
+#oic-iv-compare-overlay .iv-cmp-view-btn-active:hover {
+  background: var(--cmp-accent);
+  color: #ffffff;
+}
+
+#oic-iv-compare-overlay .iv-cmp-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#oic-iv-compare-overlay .iv-cmp-table-head {
+  display: grid;
+  grid-template-columns: 24px 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--cmp-text-muted);
+  background: var(--cmp-toolbar-bg);
+  border-bottom: 1px solid var(--cmp-border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+#oic-iv-compare-overlay .iv-cmp-table.iv-cmp-nested .iv-cmp-table-head {
+  display: none;
+}
+#oic-iv-compare-overlay .iv-cmp-trow {
+  border: 1px solid var(--cmp-border);
+  border-radius: 4px;
+  background: var(--cmp-surface);
+  overflow: hidden;
+}
+#oic-iv-compare-overlay .iv-cmp-trow-header {
+  display: grid;
+  grid-template-columns: 24px 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  align-items: center;
+  cursor: pointer;
+}
+#oic-iv-compare-overlay .iv-cmp-trow-header:hover {
+  background: var(--cmp-node-hover);
+}
+#oic-iv-compare-overlay .iv-cmp-tcell {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+#oic-iv-compare-overlay .iv-cmp-tcell-left {
+  border-right: 1px dashed var(--cmp-border);
+  padding-right: 8px;
+}
+#oic-iv-compare-overlay .iv-cmp-tcell .iv-cmp-node-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#oic-iv-compare-overlay .iv-cmp-tcell-empty {
+  color: var(--cmp-text-faint);
+  justify-content: center;
+  opacity: 0.5;
+}
+#oic-iv-compare-overlay .iv-cmp-trow-modified {
+  border-left: 3px solid var(--cmp-status-modified);
+}
+#oic-iv-compare-overlay .iv-cmp-trow-added .iv-cmp-tcell-right {
+  background: var(--cmp-line-add-bg);
+}
+#oic-iv-compare-overlay .iv-cmp-trow-removed .iv-cmp-tcell-left {
+  background: var(--cmp-line-del-bg);
+}
+#oic-iv-compare-overlay .iv-cmp-trow-moved {
+  border-left: 3px solid var(--cmp-status-moved);
+}
+#oic-iv-compare-overlay .iv-cmp-trow-expand {
+  display: none;
+  padding: 6px 12px 8px 32px;
+  border-top: 1px solid var(--cmp-border);
+  background: var(--cmp-bg);
+}
+#oic-iv-compare-overlay .iv-cmp-trow-open > .iv-cmp-trow-expand {
+  display: block;
+}
+#oic-iv-compare-overlay .iv-cmp-trow-expand .iv-cmp-node-body {
+  display: block;
+  margin-left: 0;
+}
+#oic-iv-compare-overlay .iv-cmp-table.iv-cmp-nested {
+  margin-top: 6px;
+  padding-left: 0;
+  border-left: 0;
+}
+#oic-iv-compare-overlay .iv-cmp-trow.iv-cmp-hidden {
+  display: none;
+}
