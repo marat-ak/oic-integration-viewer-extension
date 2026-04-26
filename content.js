@@ -319,6 +319,263 @@
       });
   }
 
+  // True only on an OIC console page where same-origin auth + chrome.* APIs are available.
+  function isLiveHost() {
+    return location.hostname.indexOf('oraclecloud.com') !== -1 &&
+      typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.local);
+  }
+
+  // Search OIC integrations by code OR name (parallel) and return deduped list.
+  // Resolves to []; rejects only on AbortError.
+  function searchIntegrations(query, signal) {
+    if (!query || query.length < 2) return Promise.resolve([]);
+    var inst = getIntegrationInstance();
+    var base = '/ic/api/integration/v1/integrations?offset=0&limit=20&return=landing';
+    if (inst) base += '&integrationInstance=' + encodeURIComponent(inst);
+    var safe = query.replace(/'/g, "\\'");
+    function call(field) {
+      var q = encodeURIComponent("{" + field + ":'" + safe + "'}");
+      return fetch(base + '&q=' + q, {
+        headers: AUTH_HEADERS,
+        credentials: 'same-origin',
+        signal: signal
+      }).then(function (r) { return r.ok ? r.json() : { items: [] }; })
+        .catch(function (e) { if (e && e.name === 'AbortError') throw e; return { items: [] }; });
+    }
+    return Promise.all([call('code'), call('name')]).then(function (responses) {
+      var seen = Object.create(null);
+      var out = [];
+      for (var i = 0; i < responses.length; i++) {
+        var items = (responses[i] && responses[i].items) || [];
+        for (var j = 0; j < items.length; j++) {
+          var it = items[j];
+          if (!it || !it.code || !it.version) continue;
+          var k = it.code + '|' + it.version;
+          if (seen[k]) continue;
+          seen[k] = 1;
+          out.push({ code: it.code, version: it.version, name: it.name || '', status: it.status || '' });
+        }
+      }
+      return out;
+    });
+  }
+
+  // Build an integration-picker autocomplete (replaces the old code+version input pair).
+  // Returns { element, input, getSelection, getRawValue, persist, clear, focus }.
+  function createIntegrationAutocomplete(opts) {
+    opts = opts || {};
+    var storageKey = opts.storageKey;
+    var legacyCodeKey = opts.legacyCodeKey;       // optional one-shot migration
+    var legacyVersionKey = opts.legacyVersionKey;
+
+    var wrap = document.createElement('div');
+    wrap.className = 'iv-ac-wrap';
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'iv-source-input iv-ac-input' + (opts.smallInput ? ' iv-source-input-sm' : '');
+    if (opts.idPrefix) input.id = opts.idPrefix + '-input';
+    input.placeholder = opts.placeholder || 'Search integrations by name or code…';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+
+    var dd = document.createElement('ul');
+    dd.className = 'iv-ac-dropdown';
+    dd.hidden = true;
+
+    wrap.appendChild(input);
+    wrap.appendChild(dd);
+
+    var state = { items: [], active: -1, abort: null, selected: null, lastQuery: '' };
+
+    function hideDropdown() { dd.hidden = true; state.active = -1; }
+    function showDropdown() { dd.hidden = false; }
+
+    function renderMessage(cls, text) {
+      dd.innerHTML = '';
+      var li = document.createElement('li');
+      li.className = cls;
+      li.textContent = text;
+      dd.appendChild(li);
+      showDropdown();
+    }
+
+    function render() {
+      dd.innerHTML = '';
+      if (state.items.length === 0) {
+        renderMessage('iv-ac-empty', 'No matches');
+        return;
+      }
+      for (var i = 0; i < state.items.length; i++) {
+        var it = state.items[i];
+        var li = document.createElement('li');
+        li.className = 'iv-ac-item' + (i === state.active ? ' iv-ac-item-active' : '');
+        li.dataset.idx = String(i);
+
+        var nameEl = document.createElement('div');
+        nameEl.className = 'iv-ac-name';
+        nameEl.textContent = it.name || it.code;
+
+        var meta = document.createElement('div');
+        meta.className = 'iv-ac-meta';
+        var codeSpan = document.createElement('span');
+        codeSpan.textContent = it.code;
+        var sep = document.createElement('span');
+        sep.textContent = '|';
+        var verSpan = document.createElement('span');
+        verSpan.textContent = it.version;
+        meta.appendChild(codeSpan);
+        meta.appendChild(sep);
+        meta.appendChild(verSpan);
+        if (it.status) {
+          var st = document.createElement('span');
+          st.className = 'iv-ac-status iv-ac-status-' + String(it.status).toLowerCase();
+          st.textContent = it.status;
+          meta.appendChild(st);
+        }
+
+        li.appendChild(nameEl);
+        li.appendChild(meta);
+        li.addEventListener('mousedown', function (e) { e.preventDefault(); /* keep focus */ });
+        li.addEventListener('click', (function (idx) {
+          return function () { selectIndex(idx); };
+        })(i));
+        dd.appendChild(li);
+      }
+      showDropdown();
+    }
+
+    function selectIndex(i) {
+      var it = state.items[i];
+      if (!it) return;
+      state.selected = { code: it.code, version: it.version, name: it.name || '' };
+      input.value = it.code + ' | ' + it.version;
+      hideDropdown();
+      persist();
+      if (typeof opts.onSelect === 'function') opts.onSelect(state.selected);
+    }
+
+    function parseFreeText(s) {
+      if (!s) return null;
+      var m = /^\s*([^|\s]+)\s*\|\s*([^\s|]+)\s*$/.exec(s);
+      return m ? { code: m[1], version: m[2], name: '' } : null;
+    }
+
+    function getSelection() {
+      if (state.selected) return state.selected;
+      return parseFreeText(input.value);
+    }
+
+    function persist() {
+      if (!storageKey) return;
+      try {
+        var payload = {};
+        payload[storageKey] = state.selected;
+        chrome.storage.local.set(payload);
+      } catch (e) { /* noop */ }
+    }
+
+    function restore() {
+      try {
+        var keys = [storageKey];
+        if (legacyCodeKey) keys.push(legacyCodeKey);
+        if (legacyVersionKey) keys.push(legacyVersionKey);
+        chrome.storage.local.get(keys, function (data) {
+          var saved = storageKey ? data[storageKey] : null;
+          if (saved && saved.code && saved.version) {
+            state.selected = { code: saved.code, version: saved.version, name: saved.name || '' };
+            input.value = saved.code + ' | ' + saved.version;
+            return;
+          }
+          if (legacyCodeKey && legacyVersionKey && data[legacyCodeKey] && data[legacyVersionKey]) {
+            state.selected = { code: data[legacyCodeKey], version: data[legacyVersionKey], name: '' };
+            input.value = state.selected.code + ' | ' + state.selected.version;
+            persist();
+          }
+        });
+      } catch (e) { /* noop */ }
+    }
+
+    function runSearch() {
+      var q = input.value.trim();
+      if (q.length < 2) { hideDropdown(); return; }
+      if (!isLiveHost()) {
+        renderMessage('iv-ac-empty', 'Live search unavailable here — paste CODE|VERSION');
+        return;
+      }
+      // Skip if this is just the "code | version" we already populated from a selection
+      if (state.selected && q === (state.selected.code + ' | ' + state.selected.version)) {
+        hideDropdown();
+        return;
+      }
+      if (state.abort) { try { state.abort.abort(); } catch (e) { /* noop */ } }
+      var ctrl = new AbortController();
+      state.abort = ctrl;
+      state.lastQuery = q;
+      renderMessage('iv-ac-loading', 'Searching…');
+      searchIntegrations(q, ctrl.signal).then(function (items) {
+        if (state.abort !== ctrl) return; // stale
+        state.items = items;
+        state.active = items.length > 0 ? 0 : -1;
+        render();
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        if (state.abort !== ctrl) return;
+        renderMessage('iv-ac-error', 'Search failed');
+      });
+    }
+
+    var debouncedSearch = debounce(runSearch, 250);
+
+    input.addEventListener('input', function () {
+      state.selected = null;
+      debouncedSearch();
+    });
+
+    input.addEventListener('focus', function () {
+      if (state.items.length > 0 && input.value.trim().length >= 2) showDropdown();
+    });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown') {
+        if (dd.hidden || state.items.length === 0) return;
+        e.preventDefault();
+        state.active = (state.active + 1) % state.items.length;
+        render();
+      } else if (e.key === 'ArrowUp') {
+        if (dd.hidden || state.items.length === 0) return;
+        e.preventDefault();
+        state.active = (state.active - 1 + state.items.length) % state.items.length;
+        render();
+      } else if (e.key === 'Enter') {
+        if (!dd.hidden && state.active >= 0 && state.items.length > 0) {
+          e.preventDefault();
+          selectIndex(state.active);
+        } else if (typeof opts.onSubmit === 'function') {
+          opts.onSubmit(getSelection());
+        }
+      } else if (e.key === 'Escape') {
+        if (!dd.hidden) { e.stopPropagation(); hideDropdown(); }
+      }
+    });
+
+    document.addEventListener('mousedown', function (e) {
+      if (!wrap.contains(e.target)) hideDropdown();
+    });
+
+    restore();
+
+    return {
+      element: wrap,
+      input: input,
+      getSelection: getSelection,
+      getRawValue: function () { return input.value; },
+      persist: persist,
+      clear: function () { input.value = ''; state.selected = null; state.items = []; hideDropdown(); },
+      focus: function () { input.focus(); }
+    };
+  }
+
   // Parse expr.properties into an object
   function parseExprProperties(text) {
     var result = {};
@@ -753,8 +1010,13 @@
           var detail = { files: {} };
           for (var i = 0; i < files.length; i++) {
             detail.files[files[i].path] = files[i].content;
-            // Parse expr.properties specially for easier display
-            if (/expr\.properties$/.test(files[i].path)) {
+            // Parse expr.properties specially for easier display.
+            // Split: PRECONDITIONexpr.properties (THROW's IF-NOT condition) vs plain expr.properties.
+            // NB: regex /expr\.properties$/ alone matches both, so check the basename explicitly.
+            var basename = files[i].path.split('/').pop();
+            if (basename === 'PRECONDITIONexpr.properties') {
+              detail.preconditionExpression = parseExprProperties(files[i].content);
+            } else if (basename === 'expr.properties') {
               detail.expression = parseExprProperties(files[i].content);
             }
           }
@@ -960,59 +1222,36 @@
     toolbar.appendChild(compareBtn);
     toolbar.appendChild(progressSpan);
 
-    /* Source bar (integration code + version + import live / upload) */
+    /* Source bar (integration autocomplete + import live / upload) */
     var sourceBar = document.createElement('div');
     sourceBar.className = 'iv-source-bar';
 
-    var codeLabel = document.createElement('label');
-    codeLabel.className = 'iv-source-label';
-    codeLabel.textContent = 'Code';
-    var codeField = document.createElement('input');
-    codeField.type = 'text';
-    codeField.id = 'iv-src-code';
-    codeField.className = 'iv-source-input';
-    codeField.placeholder = 'e.g. CREATE_ORDER_IN_ORACLE';
-
-    var versionLabel = document.createElement('label');
-    versionLabel.className = 'iv-source-label';
-    versionLabel.textContent = 'Version';
-    var versionField = document.createElement('input');
-    versionField.type = 'text';
-    versionField.id = 'iv-src-version';
-    versionField.className = 'iv-source-input iv-source-input-sm';
-    versionField.placeholder = 'e.g. 01.00.0040';
-
-    // Restore last-used values
-    try {
-      chrome.storage.local.get(['ivLastCode', 'ivLastVersion'], function (data) {
-        if (data.ivLastCode) codeField.value = data.ivLastCode;
-        if (data.ivLastVersion) versionField.value = data.ivLastVersion;
-      });
-    } catch (e) { /* noop */ }
-
-    function saveSource() {
-      try {
-        chrome.storage.local.set({
-          ivLastCode: codeField.value.trim(),
-          ivLastVersion: versionField.value.trim()
-        });
-      } catch (e) { /* noop */ }
-    }
+    var sourceLabel = document.createElement('label');
+    sourceLabel.className = 'iv-source-label';
+    sourceLabel.textContent = 'Integration';
 
     var liveBtn = document.createElement('button');
     liveBtn.id = 'iv-archive-btn';
     liveBtn.textContent = '📦 Import Live';
     liveBtn.title = 'Download archive from the OIC server';
+
+    var srcAc = createIntegrationAutocomplete({
+      idPrefix: 'iv-src',
+      storageKey: 'ivLastIntegration',
+      legacyCodeKey: 'ivLastCode',
+      legacyVersionKey: 'ivLastVersion',
+      onSubmit: function () { liveBtn.click(); }
+    });
+
     liveBtn.addEventListener('click', function () {
-      var c = codeField.value.trim();
-      var v = versionField.value.trim();
-      if (!c || !v) {
-        showError('Enter both Integration Code and Version.');
+      var sel = srcAc.getSelection();
+      if (!sel) {
+        showError('Pick an integration from the dropdown, or type CODE | VERSION.');
         return;
       }
-      currentCode = c;
-      currentVersion = v;
-      saveSource();
+      currentCode = sel.code;
+      currentVersion = sel.version;
+      srcAc.persist();
       loadArchiveFromServer();
     });
 
@@ -1039,18 +1278,8 @@
       input.click();
     });
 
-    // Enter on version triggers Import Live
-    versionField.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') liveBtn.click();
-    });
-    codeField.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') versionField.focus();
-    });
-
-    sourceBar.appendChild(codeLabel);
-    sourceBar.appendChild(codeField);
-    sourceBar.appendChild(versionLabel);
-    sourceBar.appendChild(versionField);
+    sourceBar.appendChild(sourceLabel);
+    sourceBar.appendChild(srcAc.element);
     sourceBar.appendChild(liveBtn);
     sourceBar.appendChild(uploadBtn);
 
@@ -1198,10 +1427,16 @@
       '(unnamed)';
   }
 
-  // Returns the XPath expression for an activity from its archive detail, or ''
+  // Returns the XPath expression for an activity from its archive detail, or ''.
+  // THROW activities use PRECONDITIONexpr.properties (the IF-NOT condition);
+  // all others use plain expr.properties.
   function getActivityXpath(activity) {
     var ad = activity && activity._archiveDetail;
-    if (!ad || !ad.expression) return '';
+    if (!ad) return '';
+    if (activity && activity.type === 'THROW' && ad.preconditionExpression) {
+      return ad.preconditionExpression.XpathExpression || ad.preconditionExpression.TextExpression || '';
+    }
+    if (!ad.expression) return '';
     return ad.expression.XpathExpression || ad.expression.TextExpression || '';
   }
 
@@ -1362,6 +1597,11 @@
     // Archive-sourced details
     if (activity._archiveDetail) {
       var ad = activity._archiveDetail;
+      if (ad.preconditionExpression) {
+        var pe = ad.preconditionExpression;
+        if (pe.XpathExpression) addRow('Precondition XPath', pe.XpathExpression);
+        else if (pe.TextExpression) addRow('Precondition', pe.TextExpression);
+      }
       if (ad.expression) {
         var e = ad.expression;
         if (e.TextExpression) addRow('Expression', e.TextExpression);
@@ -2070,6 +2310,10 @@
       '      if (ad.expression.VariableType) parts.push(ad.expression.VariableType);\n' +
       '      if (ad.expression.VariableDescription) parts.push(ad.expression.VariableDescription);\n' +
       '    }\n' +
+      '    if (ad.preconditionExpression) {\n' +
+      '      if (ad.preconditionExpression.XpathExpression) parts.push(ad.preconditionExpression.XpathExpression);\n' +
+      '      if (ad.preconditionExpression.TextExpression) parts.push(ad.preconditionExpression.TextExpression);\n' +
+      '    }\n' +
       '    if (ad.files) { var keys = Object.keys(ad.files); for (var i = 0; i < keys.length; i++) { parts.push(keys[i]); parts.push(ad.files[keys[i]]); } }\n' +
       '  }\n' +
       '  return parts.join(" ").toLowerCase();\n' +
@@ -2100,6 +2344,10 @@
       '  if (activity.configured != null) addRow("Configured", activity.configured ? "Yes" : "No");\n' +
       '  if (activity._archiveDetail) {\n' +
       '    var ad = activity._archiveDetail;\n' +
+      '    if (ad.preconditionExpression) {\n' +
+      '      if (ad.preconditionExpression.XpathExpression) addRow("Precondition XPath", ad.preconditionExpression.XpathExpression);\n' +
+      '      else if (ad.preconditionExpression.TextExpression) addRow("Precondition", ad.preconditionExpression.TextExpression);\n' +
+      '    }\n' +
       '    if (ad.expression) {\n' +
       '      if (ad.expression.TextExpression) addRow("Expression", ad.expression.TextExpression);\n' +
       '      if (ad.expression.XpathExpression) addRow("XPath", ad.expression.XpathExpression);\n' +
@@ -2595,7 +2843,7 @@
       createOverlay();
       var tc = document.getElementById('iv-tree-container');
       if (tc) {
-        tc.innerHTML = '<div class="iv-empty-state">Enter Integration Code &amp; Version, then click <b>Import Live</b>,<br>or click <b>Upload Archive</b> to load a .iar file.</div>';
+        tc.innerHTML = '<div class="iv-empty-state">Type an integration name or code to search, pick from the dropdown, then click <b>Import Live</b>,<br>or click <b>Upload Archive</b> to load a .iar file.</div>';
       }
     });
   }
@@ -2852,32 +3100,27 @@
     status.id = 'iv-cmp-' + side + '-status';
     status.textContent = '(not loaded)';
 
-    var codeField = document.createElement('input');
-    codeField.type = 'text';
-    codeField.placeholder = 'Integration Code';
-    codeField.className = 'iv-cmp-input';
-    codeField.id = 'iv-cmp-' + side + '-code';
-
-    var versionField = document.createElement('input');
-    versionField.type = 'text';
-    versionField.placeholder = 'Version';
-    versionField.className = 'iv-cmp-input iv-cmp-input-sm';
-    versionField.id = 'iv-cmp-' + side + '-version';
+    var ac = createIntegrationAutocomplete({
+      idPrefix: 'iv-cmp-' + side,
+      storageKey: 'ivCmpLast_' + side,
+      placeholder: 'Search integrations by name or code…',
+      onSubmit: function () { liveBtn.click(); }
+    });
 
     var liveBtn = document.createElement('button');
     liveBtn.textContent = '📦 Live';
     liveBtn.title = 'Download archive from OIC server';
     liveBtn.addEventListener('click', function () {
-      var c = codeField.value.trim();
-      var v = versionField.value.trim();
-      if (!c || !v) { setComparePI(side, 'Enter Code and Version'); return; }
+      var sel = ac.getSelection();
+      if (!sel) { setComparePI(side, 'Pick an integration or type CODE|VERSION'); return; }
       if (location.hostname.indexOf('oraclecloud.com') === -1) {
         setComparePI(side, 'Live requires *.oraclecloud.com page; use Upload Archive instead.');
         return;
       }
+      ac.persist();
       setComparePI(side, 'Downloading…');
       liveBtn.disabled = true;
-      fetchArchive(c, v)
+      fetchArchive(sel.code, sel.version)
         .then(function (ab) { return processCompareArchive(side, ab); })
         .catch(function (err) { setComparePI(side, 'Error: ' + (err.message || err)); })
         .then(function () { liveBtn.disabled = false; });
@@ -2934,8 +3177,7 @@
 
     bar.appendChild(sideLabel);
     bar.appendChild(status);
-    bar.appendChild(codeField);
-    bar.appendChild(versionField);
+    bar.appendChild(ac.element);
     bar.appendChild(liveBtn);
     bar.appendChild(uploadBtn);
     bar.appendChild(jsonBtn);
@@ -3931,7 +4173,7 @@
       '  function effType(dn){var a=dn.right||dn.left;if(!a)return "";if(a.type==="LABEL"&&a.activities&&a.activities.length>0&&a.activities.every(function(x){return x.type==="ASSIGNMENT";}))return "ASSIGNMENT";return a.type||"";}\n' +
       '  function dispType(dn){var t=effType(dn);return TYPE_DISPLAY[t]||t||"";}\n' +
       '  function activityName(a){if(!a)return "";return a.name||a.endpointName||a.variableName||a.faultName||(a.mappedTarget&&a.mappedTarget.name)||a.connectionName||a.id||"(unnamed)";}\n' +
-      '  function getXpath(a){var ad=a&&a._archiveDetail;if(!ad||!ad.expression)return "";return ad.expression.XpathExpression||ad.expression.TextExpression||"";}\n' +
+      '  function getXpath(a){var ad=a&&a._archiveDetail;if(!ad)return "";if(a&&a.type==="THROW"&&ad.preconditionExpression)return ad.preconditionExpression.XpathExpression||ad.preconditionExpression.TextExpression||"";if(!ad.expression)return "";return ad.expression.XpathExpression||ad.expression.TextExpression||"";}\n' +
       '  function trunc(x){if(!x)return "";return x.length<=60?x:x.substring(0,60)+"…";}\n' +
       '  function render(dn,depth){\n' +
       '    var node=document.createElement("div");node.className="iv-cmp-node iv-cmp-status-"+dn.status;node._diff=dn;\n' +
