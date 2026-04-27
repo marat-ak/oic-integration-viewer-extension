@@ -9,6 +9,7 @@
   var maxXpathCharsInPreview = 60;
   var currentCode = null;
   var currentVersion = null;
+  var currentProjectCode = null;
 
   /* ── Constants ─────────────────────────────────────────────────────── */
 
@@ -305,8 +306,14 @@
 
   /* ── Archive (.iar) download/import and merging ─────────────────────── */
 
-  // Download the integration archive (ZIP) from OIC
-  function fetchArchive(code, version) {
+  // Download the integration archive (ZIP) from OIC.
+  // For non-project integrations: GET /integrations/{code}|{version}/archive (returns .iar).
+  // For project integrations: orchestrate temp deployment + project archive (returns .car).
+  // onProgress is optional — receives short status strings during the project flow.
+  function fetchArchive(code, version, projectCode, onProgress) {
+    if (projectCode) {
+      return fetchProjectIntegrationArchiveCar(projectCode, '', code, version, onProgress);
+    }
     var inst = getIntegrationInstance();
     var url = '/ic/api/integration/v1/integrations/' +
       encodeURIComponent(code + '|' + version) +
@@ -319,22 +326,297 @@
       });
   }
 
+  /* ── Project archive (.car) flow: temp deployment + archive + cleanup ─ */
+
+  function projectsApiBase(projectCode) {
+    return '/ic/api/integration/v1/projects/' + encodeURIComponent(projectCode);
+  }
+
+  function withInst(url) {
+    var inst = getIntegrationInstance();
+    if (!inst) return url;
+    var sep = url.indexOf('?') === -1 ? '?' : '&';
+    return url + sep + 'integrationInstance=' + encodeURIComponent(inst);
+  }
+
+  // OIC requires this header on state-changing calls (POST/PUT/DELETE) to its design API.
+  var CSRF_HEADERS = { 'Authorization': 'session', 'X-OCI-Splat-CSRF': '1' };
+
+  function postJson(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: Object.assign({}, CSRF_HEADERS, {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      }),
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    });
+  }
+
+  function createProjectDeployment(projectCode, deploymentSpec) {
+    var url = withInst(projectsApiBase(projectCode) + '/deployments');
+    return postJson(url, deploymentSpec).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          throw new Error('Deployment create failed: ' + r.status + ' ' + (t || r.statusText));
+        });
+      }
+      return r.json().catch(function () { return null; });
+    });
+  }
+
+  function deleteProjectDeployment(projectCode, deploymentCode) {
+    var url = withInst(projectsApiBase(projectCode) + '/deployments/' + encodeURIComponent(deploymentCode));
+    return fetch(url, {
+      method: 'DELETE',
+      headers: Object.assign({}, CSRF_HEADERS, { 'Accept': 'application/json' }),
+      credentials: 'same-origin'
+    }).then(function (r) {
+      if (!r.ok && r.status !== 404) throw new Error('Deployment delete failed: ' + r.status);
+      return true;
+    });
+  }
+
+  // Poll an OIC work request until it terminates. Returns the final item.
+  // Status values: ACCEPTED, IN_PROGRESS, SUCCEEDED, FAILED, CANCELED.
+  function pollWorkRequest(workRequestId) {
+    var iterations = 0;
+    function step() {
+      iterations++;
+      var url = withInst('/ic/api/integration/v1/workRequests?q=' +
+        encodeURIComponent("{ids:'" + workRequestId + "'}"));
+      return fetch(url, {
+        headers: { 'Authorization': 'session', 'Accept': 'application/json' },
+        credentials: 'same-origin'
+      }).then(function (r) {
+        if (!r.ok) throw new Error('Work request poll failed: ' + r.status);
+        return r.json();
+      }).then(function (body) {
+        var item = body && body.items && body.items[0];
+        if (!item) throw new Error('Work request not found: ' + workRequestId);
+        var status = String(item.status || '').toUpperCase();
+        if (status === 'SUCCEEDED') return item;
+        if (status === 'FAILED' || status === 'CANCELED' || status === 'CANCELLED') {
+          var msg = (item.data && item.data.message) || status;
+          throw new Error('Project archive ' + status + ': ' + msg);
+        }
+        if (iterations > 80) throw new Error('Project archive timed out (>120s)');
+        return new Promise(function (res) { setTimeout(res, 1500); }).then(step);
+      });
+    }
+    return step();
+  }
+
+  // POST /projects/{pc}/archive?enableAsync=true with archiveSpec; resolves to ArrayBuffer of the .car.
+  // Real OIC async flow:
+  //   1. POST → 202, response header `oic-work-request-id: <uuid>`.
+  //   2. Poll GET /workRequests?q={ids:'<uuid>'} until items[0].status === 'SUCCEEDED'.
+  //   3. GET /projects/{pc}/archive?archiveName=<items[0].data.objectName> → binary .car.
+  function archiveProjectDeployment(projectCode, archiveSpec) {
+    var postUrl = withInst(projectsApiBase(projectCode) + '/archive?enableAsync=true');
+    return fetch(postUrl, {
+      method: 'POST',
+      headers: Object.assign({}, CSRF_HEADERS, {
+        'Content-Type': 'application/json',
+        'Accept': 'application/octet-stream, application/json'
+      }),
+      credentials: 'same-origin',
+      body: JSON.stringify(archiveSpec)
+    }).then(function (r) {
+      if (!r.ok && r.status !== 202) {
+        return r.text().then(function (t) {
+          throw new Error('Project archive failed: ' + r.status + ' ' + (t || r.statusText));
+        });
+      }
+      // Sync mode (rare): 200 + binary body.
+      var ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (r.status === 200 && ct.indexOf('application/json') === -1 &&
+          ct.indexOf('text/') === -1 && ct !== '') {
+        return r.arrayBuffer();
+      }
+      var workRequestId = r.headers.get('oic-work-request-id') || r.headers.get('Oic-Work-Request-Id');
+      if (!workRequestId) {
+        throw new Error('Project archive: missing oic-work-request-id header');
+      }
+      return pollWorkRequest(workRequestId).then(function (item) {
+        var objectName = item && item.data && item.data.objectName;
+        if (!objectName) throw new Error('Work request succeeded but objectName missing');
+        var dlUrl = withInst(projectsApiBase(projectCode) + '/archive?archiveName=' + encodeURIComponent(objectName));
+        return fetch(dlUrl, {
+          headers: { 'Authorization': 'session', 'Accept': 'application/octet-stream' },
+          credentials: 'same-origin'
+        }).then(function (r2) {
+          if (!r2.ok) throw new Error('Archive download failed: ' + r2.status);
+          return r2.arrayBuffer();
+        });
+      });
+    });
+  }
+
+  // Orchestrate: confirm with user → create temp deployment → archive → cleanup.
+  // projectName may be empty; falls back to projectCode for the archive payload.
+  function fetchProjectIntegrationArchiveCar(projectCode, projectName, code, version, onProgress) {
+    function emit(msg) { if (typeof onProgress === 'function') onProgress(msg); }
+    return ensureProjectArchiveConsent(projectCode, code).then(function (ok) {
+      if (!ok) { var err = new Error('Cancelled by user.'); err.cancelled = true; throw err; }
+      var ts = Date.now().toString(36).toUpperCase();
+      var deploymentCode = 'TMP_VIEWER_' + ts;
+      // Name rules per OIC: letters/numbers/spaces/( _ - ), begin with letter or underscore, max 50.
+      var safeCode = String(code || '').replace(/[^A-Za-z0-9 _-]/g, '_');
+      var deploymentName = ('Temp viewer ' + safeCode).slice(0, 50).replace(/[\s_-]+$/, '');
+      var deploymentSpec = {
+        name: deploymentName,
+        code: deploymentCode,
+        description: 'Auto-created by OIC Integration Viewer extension; safe to delete.',
+        integrations: [{ code: code, version: version }],
+        agents: [], robots: [], processes: [], decisions: [], b2btradingpartners: []
+      };
+      var archiveSpec = {
+        name: projectName || projectCode,
+        code: projectCode,
+        type: 'DEVELOPED',
+        builtBy: '',
+        label: deploymentCode
+      };
+      var deploymentCreated = false;
+      emit('Creating temporary deployment…');
+      return createProjectDeployment(projectCode, deploymentSpec)
+        .then(function () {
+          deploymentCreated = true;
+          emit('Building archive…');
+          return archiveProjectDeployment(projectCode, archiveSpec);
+        })
+        .then(function (ab) {
+          emit('Cleaning up…');
+          return ab;
+        })
+        .finally(function () {
+          if (deploymentCreated) {
+            deleteProjectDeployment(projectCode, deploymentCode).catch(function (e) {
+              console.warn('OIC viewer: temp deployment cleanup failed', e);
+            });
+          }
+        });
+    });
+  }
+
+  // First-run consent modal — explains the temp-deployment flow once.
+  // Resolves to true (proceed) or false (cancel). Stores dismissal in chrome.storage.local.
+  function ensureProjectArchiveConsent(projectCode, integrationCode) {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(value) { if (done) return; done = true; resolve(value); }
+
+      try {
+        chrome.storage.local.get(['ivProjectArchiveConfirmDismissed'], function (data) {
+          if (data && data.ivProjectArchiveConfirmDismissed) { finish(true); return; }
+          showConsentModal();
+        });
+      } catch (e) { showConsentModal(); }
+
+      function showConsentModal() {
+        var existing = document.getElementById('iv-consent-modal');
+        if (existing) existing.remove();
+
+        var ovl = document.getElementById('oic-iv-overlay');
+        var theme = ovl ? (ovl.getAttribute('data-theme') || 'light') : 'light';
+
+        var backdrop = document.createElement('div');
+        backdrop.id = 'iv-consent-modal';
+        backdrop.className = 'iv-modal-backdrop';
+        backdrop.setAttribute('data-theme', theme);
+
+        var panel = document.createElement('div');
+        panel.className = 'iv-modal';
+
+        var title = document.createElement('div');
+        title.className = 'iv-modal-title';
+        title.textContent = 'Project integration export';
+
+        var body = document.createElement('div');
+        body.className = 'iv-modal-body';
+        body.textContent = 'To download integration "' + integrationCode + '" from project "' + projectCode +
+          '", the viewer needs to create a temporary deployment in OIC, archive it, then delete the deployment. Continue?';
+
+        var checkRow = document.createElement('label');
+        checkRow.className = 'iv-modal-check';
+        var check = document.createElement('input');
+        check.type = 'checkbox';
+        var checkLabel = document.createElement('span');
+        checkLabel.textContent = "Don't ask again";
+        checkRow.appendChild(check);
+        checkRow.appendChild(checkLabel);
+
+        var btnBar = document.createElement('div');
+        btnBar.className = 'iv-modal-btnbar';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'iv-modal-btn iv-modal-btn-cancel';
+        cancelBtn.textContent = 'Cancel';
+        var okBtn = document.createElement('button');
+        okBtn.className = 'iv-modal-btn iv-modal-btn-ok';
+        okBtn.textContent = 'Continue';
+        btnBar.appendChild(cancelBtn);
+        btnBar.appendChild(okBtn);
+
+        panel.appendChild(title);
+        panel.appendChild(body);
+        panel.appendChild(checkRow);
+        panel.appendChild(btnBar);
+        backdrop.appendChild(panel);
+        document.body.appendChild(backdrop);
+
+        function close(value) {
+          if (value && check.checked) {
+            try { chrome.storage.local.set({ ivProjectArchiveConfirmDismissed: true }); } catch (e) { /* noop */ }
+          }
+          document.removeEventListener('keydown', onKey);
+          backdrop.remove();
+          finish(value);
+        }
+        function onKey(e) {
+          if (e.key === 'Escape') { e.stopPropagation(); close(false); }
+          else if (e.key === 'Enter') { e.preventDefault(); close(true); }
+        }
+
+        cancelBtn.addEventListener('click', function () { close(false); });
+        okBtn.addEventListener('click', function () { close(true); });
+        backdrop.addEventListener('click', function (e) { if (e.target === backdrop) close(false); });
+        document.addEventListener('keydown', onKey);
+
+        setTimeout(function () { okBtn.focus(); }, 0);
+      }
+    });
+  }
+
   // True only on an OIC console page where same-origin auth + chrome.* APIs are available.
   function isLiveHost() {
     return location.hostname.indexOf('oraclecloud.com') !== -1 &&
       typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.local);
   }
 
+  // Escape single quotes for q={field:'…'} JSON-ish syntax.
+  function escapeQValue(s) { return String(s || '').replace(/'/g, "\\'"); }
+
   // Search OIC integrations by code OR name (parallel) and return deduped list.
+  // If projectCode is given, the project-scoped endpoint is used:
+  //   GET /ic/api/integration/v1/projects/{projectCode}/integrations
+  // Otherwise the global endpoint is queried with extend:'projects' so each item
+  // carries its project info on the response.
   // Resolves to []; rejects only on AbortError.
-  function searchIntegrations(query, signal) {
+  function searchIntegrations(query, signal, projectCode) {
     if (!query || query.length < 2) return Promise.resolve([]);
     var inst = getIntegrationInstance();
-    var base = '/ic/api/integration/v1/integrations?offset=0&limit=20&return=landing';
+    var basePath = projectCode
+      ? '/ic/api/integration/v1/projects/' + encodeURIComponent(projectCode) + '/integrations'
+      : '/ic/api/integration/v1/integrations';
+    var base = basePath + '?offset=0&limit=20&return=landing';
     if (inst) base += '&integrationInstance=' + encodeURIComponent(inst);
-    var safe = query.replace(/'/g, "\\'");
+    var safeQ = escapeQValue(query);
+    // Only the global endpoint needs the extend clause (project endpoint already returns projectId).
+    var extendClause = projectCode ? '' : ",extend:'projects'";
     function call(field) {
-      var q = encodeURIComponent("{" + field + ":'" + safe + "'}");
+      var q = encodeURIComponent("{" + field + ":'" + safeQ + "'" + extendClause + "}");
       return fetch(base + '&q=' + q, {
         headers: AUTH_HEADERS,
         credentials: 'same-origin',
@@ -350,23 +632,83 @@
         for (var j = 0; j < items.length; j++) {
           var it = items[j];
           if (!it || !it.code || !it.version) continue;
+          var pc = it.projectId || it.projectCode || projectCode || '';
+          // Belt-and-suspenders client-side guard (server should already scope when projectCode is in URL).
+          if (projectCode && pc && pc !== projectCode) continue;
           var k = it.code + '|' + it.version;
           if (seen[k]) continue;
           seen[k] = 1;
-          out.push({ code: it.code, version: it.version, name: it.name || '', status: it.status || '' });
+          out.push({
+            code: it.code,
+            version: it.version,
+            name: it.name || '',
+            status: it.status || '',
+            projectCode: pc
+          });
         }
       }
       return out;
     });
   }
 
-  // Build an integration-picker autocomplete (replaces the old code+version input pair).
-  // Returns { element, input, getSelection, getRawValue, persist, clear, focus }.
-  function createIntegrationAutocomplete(opts) {
+  // Search OIC projects by name fragment. Returns [{code, name, status, type}].
+  function searchProjects(query, signal) {
+    if (!query || query.length < 2) return Promise.resolve([]);
+    var inst = getIntegrationInstance();
+    var base = '/ic/api/integration/v1/projects?offset=0&limit=20&orderBy=name';
+    if (inst) base += '&integrationInstance=' + encodeURIComponent(inst);
+    var safeQ = escapeQValue(query);
+    var q = encodeURIComponent("{name:'" + safeQ + "'}");
+    return fetch(base + '&q=' + q, {
+      headers: AUTH_HEADERS,
+      credentials: 'same-origin',
+      signal: signal
+    })
+      .then(function (r) { return r.ok ? r.json() : { items: [] }; })
+      .then(function (resp) {
+        var items = (resp && resp.items) || [];
+        var seen = Object.create(null);
+        var out = [];
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          if (!it || !it.code) continue;
+          if (seen[it.code]) continue;
+          seen[it.code] = 1;
+          var status = (it.state && it.state.status) || it.status || '';
+          out.push({
+            code: it.code,
+            name: it.name || it.code,
+            status: status,
+            type: it.type || ''
+          });
+        }
+        return out;
+      })
+      .catch(function (e) { if (e && e.name === 'AbortError') throw e; return []; });
+  }
+
+  // Generic search-as-you-type autocomplete factory.
+  //
+  // opts (required unless noted):
+  //   idPrefix         — DOM id prefix (optional)
+  //   storageKey       — chrome.storage.local key for the selected item (optional)
+  //   smallInput       — render with smaller width (boolean, optional)
+  //   placeholder      — input placeholder text
+  //   search(q,signal) — Promise<items[]>; must respect AbortSignal
+  //   itemKey(item)    — string key (used for dedupe/equality)
+  //   displayValue(it) — string written to the input on select
+  //   parseFreeText(s) — returns a synthetic selection from free-typed text or null
+  //   renderItem(it)   — { name: string, metaParts: (string|HTMLElement)[], status?: string }
+  //   minChars         — minimum chars before search fires (default 2)
+  //   onSelect(item)   — called after a row is picked
+  //   onSubmit(sel)    — called on Enter when no row is highlighted
+  //   onChange(item)   — called whenever selection changes (incl. clear)
+  //   migrateLegacy(data, persist) — optional one-shot migration; reads other keys
+  //   migrateLegacyKeys[] — extra keys requested in chrome.storage.local.get for migration
+  function createSearchAutocomplete(opts) {
     opts = opts || {};
     var storageKey = opts.storageKey;
-    var legacyCodeKey = opts.legacyCodeKey;       // optional one-shot migration
-    var legacyVersionKey = opts.legacyVersionKey;
+    var minChars = typeof opts.minChars === 'number' ? opts.minChars : 2;
 
     var wrap = document.createElement('div');
     wrap.className = 'iv-ac-wrap';
@@ -375,7 +717,7 @@
     input.type = 'text';
     input.className = 'iv-source-input iv-ac-input' + (opts.smallInput ? ' iv-source-input-sm' : '');
     if (opts.idPrefix) input.id = opts.idPrefix + '-input';
-    input.placeholder = opts.placeholder || 'Search integrations by name or code…';
+    input.placeholder = opts.placeholder || 'Search…';
     input.autocomplete = 'off';
     input.spellcheck = false;
 
@@ -408,29 +750,34 @@
       }
       for (var i = 0; i < state.items.length; i++) {
         var it = state.items[i];
+        var view = opts.renderItem ? opts.renderItem(it) : { name: it.name || it.code, metaParts: [it.code], status: it.status };
+
         var li = document.createElement('li');
         li.className = 'iv-ac-item' + (i === state.active ? ' iv-ac-item-active' : '');
         li.dataset.idx = String(i);
 
         var nameEl = document.createElement('div');
         nameEl.className = 'iv-ac-name';
-        nameEl.textContent = it.name || it.code;
+        nameEl.textContent = view.name || '';
 
         var meta = document.createElement('div');
         meta.className = 'iv-ac-meta';
-        var codeSpan = document.createElement('span');
-        codeSpan.textContent = it.code;
-        var sep = document.createElement('span');
-        sep.textContent = '|';
-        var verSpan = document.createElement('span');
-        verSpan.textContent = it.version;
-        meta.appendChild(codeSpan);
-        meta.appendChild(sep);
-        meta.appendChild(verSpan);
-        if (it.status) {
+        var parts = view.metaParts || [];
+        for (var p = 0; p < parts.length; p++) {
+          var part = parts[p];
+          if (part == null || part === '') continue;
+          if (typeof part === 'string') {
+            var span = document.createElement('span');
+            span.textContent = part;
+            meta.appendChild(span);
+          } else {
+            meta.appendChild(part);
+          }
+        }
+        if (view.status) {
           var st = document.createElement('span');
-          st.className = 'iv-ac-status iv-ac-status-' + String(it.status).toLowerCase();
-          st.textContent = it.status;
+          st.className = 'iv-ac-status iv-ac-status-' + String(view.status).toLowerCase();
+          st.textContent = view.status;
           meta.appendChild(st);
         }
 
@@ -448,22 +795,18 @@
     function selectIndex(i) {
       var it = state.items[i];
       if (!it) return;
-      state.selected = { code: it.code, version: it.version, name: it.name || '' };
-      input.value = it.code + ' | ' + it.version;
+      state.selected = it;
+      input.value = opts.displayValue ? opts.displayValue(it) : (it.code || '');
       hideDropdown();
       persist();
-      if (typeof opts.onSelect === 'function') opts.onSelect(state.selected);
-    }
-
-    function parseFreeText(s) {
-      if (!s) return null;
-      var m = /^\s*([^|\s]+)\s*\|\s*([^\s|]+)\s*$/.exec(s);
-      return m ? { code: m[1], version: m[2], name: '' } : null;
+      if (typeof opts.onSelect === 'function') opts.onSelect(it);
+      if (typeof opts.onChange === 'function') opts.onChange(it);
     }
 
     function getSelection() {
       if (state.selected) return state.selected;
-      return parseFreeText(input.value);
+      if (opts.parseFreeText) return opts.parseFreeText(input.value);
+      return null;
     }
 
     function persist() {
@@ -477,20 +820,25 @@
 
     function restore() {
       try {
-        var keys = [storageKey];
-        if (legacyCodeKey) keys.push(legacyCodeKey);
-        if (legacyVersionKey) keys.push(legacyVersionKey);
+        var keys = storageKey ? [storageKey] : [];
+        if (Array.isArray(opts.migrateLegacyKeys)) {
+          for (var i = 0; i < opts.migrateLegacyKeys.length; i++) keys.push(opts.migrateLegacyKeys[i]);
+        }
+        if (keys.length === 0) return;
         chrome.storage.local.get(keys, function (data) {
           var saved = storageKey ? data[storageKey] : null;
-          if (saved && saved.code && saved.version) {
-            state.selected = { code: saved.code, version: saved.version, name: saved.name || '' };
-            input.value = saved.code + ' | ' + saved.version;
+          if (saved && opts.itemKey && opts.itemKey(saved)) {
+            state.selected = saved;
+            input.value = opts.displayValue ? opts.displayValue(saved) : (saved.code || '');
             return;
           }
-          if (legacyCodeKey && legacyVersionKey && data[legacyCodeKey] && data[legacyVersionKey]) {
-            state.selected = { code: data[legacyCodeKey], version: data[legacyVersionKey], name: '' };
-            input.value = state.selected.code + ' | ' + state.selected.version;
-            persist();
+          if (typeof opts.migrateLegacy === 'function') {
+            var migrated = opts.migrateLegacy(data);
+            if (migrated) {
+              state.selected = migrated;
+              input.value = opts.displayValue ? opts.displayValue(migrated) : (migrated.code || '');
+              persist();
+            }
           }
         });
       } catch (e) { /* noop */ }
@@ -498,13 +846,13 @@
 
     function runSearch() {
       var q = input.value.trim();
-      if (q.length < 2) { hideDropdown(); return; }
+      if (q.length < minChars) { hideDropdown(); return; }
       if (!isLiveHost()) {
-        renderMessage('iv-ac-empty', 'Live search unavailable here — paste CODE|VERSION');
+        renderMessage('iv-ac-empty', 'Live search unavailable here');
         return;
       }
-      // Skip if this is just the "code | version" we already populated from a selection
-      if (state.selected && q === (state.selected.code + ' | ' + state.selected.version)) {
+      // Skip if input matches the rendered display of the current selection.
+      if (state.selected && opts.displayValue && q === opts.displayValue(state.selected)) {
         hideDropdown();
         return;
       }
@@ -513,10 +861,10 @@
       state.abort = ctrl;
       state.lastQuery = q;
       renderMessage('iv-ac-loading', 'Searching…');
-      searchIntegrations(q, ctrl.signal).then(function (items) {
+      Promise.resolve(opts.search(q, ctrl.signal)).then(function (items) {
         if (state.abort !== ctrl) return; // stale
-        state.items = items;
-        state.active = items.length > 0 ? 0 : -1;
+        state.items = items || [];
+        state.active = state.items.length > 0 ? 0 : -1;
         render();
       }).catch(function (err) {
         if (err && err.name === 'AbortError') return;
@@ -528,12 +876,14 @@
     var debouncedSearch = debounce(runSearch, 250);
 
     input.addEventListener('input', function () {
+      var hadSelection = state.selected;
       state.selected = null;
+      if (hadSelection && typeof opts.onChange === 'function') opts.onChange(null);
       debouncedSearch();
     });
 
     input.addEventListener('focus', function () {
-      if (state.items.length > 0 && input.value.trim().length >= 2) showDropdown();
+      if (state.items.length > 0 && input.value.trim().length >= minChars) showDropdown();
     });
 
     input.addEventListener('keydown', function (e) {
@@ -565,15 +915,97 @@
 
     restore();
 
+    function clear() {
+      var had = state.selected;
+      input.value = '';
+      state.selected = null;
+      state.items = [];
+      hideDropdown();
+      if (had && typeof opts.onChange === 'function') opts.onChange(null);
+      if (storageKey) {
+        try { chrome.storage.local.remove(storageKey); } catch (e) { /* noop */ }
+      }
+    }
+
     return {
       element: wrap,
       input: input,
       getSelection: getSelection,
       getRawValue: function () { return input.value; },
       persist: persist,
-      clear: function () { input.value = ''; state.selected = null; state.items = []; hideDropdown(); },
+      clear: clear,
       focus: function () { input.focus(); }
     };
+  }
+
+  // Integration picker (replaces the old code+version input pair).
+  // opts: { idPrefix, storageKey, smallInput, placeholder, getProjectCode, onSelect, onSubmit }
+  // legacyCodeKey/legacyVersionKey perform a one-shot migration from the old layout.
+  function createIntegrationAutocomplete(opts) {
+    opts = opts || {};
+    var legacyCodeKey = opts.legacyCodeKey;
+    var legacyVersionKey = opts.legacyVersionKey;
+
+    return createSearchAutocomplete({
+      idPrefix: opts.idPrefix,
+      storageKey: opts.storageKey,
+      smallInput: opts.smallInput,
+      placeholder: opts.placeholder || 'Search integrations by name or code…',
+      search: function (q, signal) {
+        var pc = typeof opts.getProjectCode === 'function' ? opts.getProjectCode() : null;
+        return searchIntegrations(q, signal, pc);
+      },
+      itemKey: function (it) { return it && it.code && it.version ? (it.code + '|' + it.version) : ''; },
+      displayValue: function (it) { return it.code + ' | ' + it.version; },
+      parseFreeText: function (s) {
+        if (!s) return null;
+        var m = /^\s*([^|\s]+)\s*\|\s*([^\s|]+)\s*$/.exec(s);
+        return m ? { code: m[1], version: m[2], name: '' } : null;
+      },
+      renderItem: function (it) {
+        return {
+          name: it.name || it.code,
+          metaParts: [it.code, '|', it.version, it.projectCode ? ('· ' + it.projectCode) : null],
+          status: it.status || ''
+        };
+      },
+      migrateLegacyKeys: legacyCodeKey && legacyVersionKey ? [legacyCodeKey, legacyVersionKey] : null,
+      migrateLegacy: legacyCodeKey && legacyVersionKey ? function (data) {
+        if (data[legacyCodeKey] && data[legacyVersionKey]) {
+          return { code: data[legacyCodeKey], version: data[legacyVersionKey], name: '' };
+        }
+        return null;
+      } : null,
+      onSelect: opts.onSelect,
+      onSubmit: opts.onSubmit
+    });
+  }
+
+  // Project picker. Selecting a project narrows integration search.
+  // opts: { idPrefix, storageKey, smallInput, placeholder, onSelect, onChange, onSubmit }
+  function createProjectAutocomplete(opts) {
+    opts = opts || {};
+    return createSearchAutocomplete({
+      idPrefix: opts.idPrefix,
+      storageKey: opts.storageKey,
+      smallInput: opts.smallInput,
+      placeholder: opts.placeholder || 'Project (optional)',
+      search: function (q, signal) { return searchProjects(q, signal); },
+      itemKey: function (it) { return it && it.code ? it.code : ''; },
+      displayValue: function (it) { return it.code; },
+      parseFreeText: function (s) {
+        var m = /^\s*([A-Za-z0-9_]+)\s*$/.exec(s || '');
+        return m ? { code: m[1], name: '' } : null;
+      },
+      renderItem: function (it) {
+        var parts = [it.code];
+        if (it.type) parts.push('· ' + it.type);
+        return { name: it.name || it.code, metaParts: parts, status: it.status || '' };
+      },
+      onSelect: opts.onSelect,
+      onChange: opts.onChange,
+      onSubmit: opts.onSubmit
+    });
   }
 
   // Parse expr.properties into an object
@@ -944,7 +1376,14 @@
     if (!orchestration) throw new Error('No orchestration element found');
 
     var globalTryEl = firstChildByName(orchestration, 'globalTry');
-    var globalTry = globalTryEl ? xmlElementToActivity(globalTryEl, appsMap, procsMap) : null;
+    var globalTry;
+    if (globalTryEl) {
+      globalTry = xmlElementToActivity(globalTryEl, appsMap, procsMap);
+    } else {
+      // Some integrations omit the <globalTry> wrapper — orchestration's direct children
+      // ARE the top-level activities. Synthesize a GLOBAL_TRY container.
+      globalTry = synthesizeGlobalTryFromOrchestration(orchestration, appsMap, procsMap);
+    }
 
     // Collect global variables (if any top-level globalVariable elements)
     var globalVariables = [];
@@ -969,6 +1408,31 @@
       _applications: appsMap,
       _processors: procsMap
     };
+  }
+
+  // Build a synthetic GLOBAL_TRY for project.xml flavours that omit the <globalTry> wrapper
+  // and put activities directly under <orchestration>.
+  function synthesizeGlobalTryFromOrchestration(orchestrationEl, appsMap, procsMap) {
+    var activities = [];
+    var catchAll = null;
+    var children = childElementsByLocalName(orchestrationEl);
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i];
+      var local = child.localName;
+      // Skip elements that are NOT activities of the orchestration tree.
+      if (local === 'globalVariable' || local === 'integrationMetadata') continue;
+      if (local === 'catchAll') {
+        catchAll = xmlElementToActivity(child, appsMap, procsMap);
+        continue;
+      }
+      if (XML_TYPE_MAP[local]) {
+        var a = xmlElementToActivity(child, appsMap, procsMap);
+        if (a) activities.push(a);
+      }
+    }
+    var node = { type: 'GLOBAL_TRY', activities: activities };
+    if (catchAll) node.catchAll = catchAll;
+    return node;
   }
 
   // Given a refUri and activity type, return archive files belonging to that activity.
@@ -1222,9 +1686,13 @@
     toolbar.appendChild(compareBtn);
     toolbar.appendChild(progressSpan);
 
-    /* Source bar (integration autocomplete + import live / upload) */
+    /* Source bar (project + integration autocompletes + import live / upload) */
     var sourceBar = document.createElement('div');
     sourceBar.className = 'iv-source-bar';
+
+    var projectLabel = document.createElement('label');
+    projectLabel.className = 'iv-source-label';
+    projectLabel.textContent = 'Project';
 
     var sourceLabel = document.createElement('label');
     sourceLabel.className = 'iv-source-label';
@@ -1235,11 +1703,26 @@
     liveBtn.textContent = '📦 Import Live';
     liveBtn.title = 'Download archive from the OIC server';
 
+    var projectAc = createProjectAutocomplete({
+      idPrefix: 'iv-src-project',
+      storageKey: 'ivLastProject',
+      smallInput: true,
+      placeholder: 'Project (optional)',
+      onChange: function () {
+        // Project changed (selected, cleared, or input cleared) — current integration may be stale.
+        if (srcAc) srcAc.clear();
+      }
+    });
+
     var srcAc = createIntegrationAutocomplete({
       idPrefix: 'iv-src',
       storageKey: 'ivLastIntegration',
       legacyCodeKey: 'ivLastCode',
       legacyVersionKey: 'ivLastVersion',
+      getProjectCode: function () {
+        var p = projectAc.getSelection();
+        return p && p.code ? p.code : null;
+      },
       onSubmit: function () { liveBtn.click(); }
     });
 
@@ -1249,9 +1732,12 @@
         showError('Pick an integration from the dropdown, or type CODE | VERSION.');
         return;
       }
+      var proj = projectAc.getSelection();
       currentCode = sel.code;
       currentVersion = sel.version;
+      currentProjectCode = sel.projectCode || (proj && proj.code) || null;
       srcAc.persist();
+      projectAc.persist();
       loadArchiveFromServer();
     });
 
@@ -1278,6 +1764,8 @@
       input.click();
     });
 
+    sourceBar.appendChild(projectLabel);
+    sourceBar.appendChild(projectAc.element);
     sourceBar.appendChild(sourceLabel);
     sourceBar.appendChild(srcAc.element);
     sourceBar.appendChild(liveBtn);
@@ -2815,9 +3303,15 @@
     if (btn) btn.disabled = true;
     if (progressEl) progressEl.textContent = 'Downloading archive…';
 
-    fetchArchive(currentCode, currentVersion)
+    function onProgress(msg) { if (progressEl) progressEl.textContent = msg; }
+
+    fetchArchive(currentCode, currentVersion, currentProjectCode, onProgress)
       .then(processArchiveBuffer)
       .catch(function (err) {
+        if (err && err.cancelled) {
+          if (progressEl) progressEl.textContent = '';
+          return;
+        }
         showError('Archive load failed: ' + (err.message || String(err)));
       })
       .then(function () {
@@ -3100,10 +3594,22 @@
     status.id = 'iv-cmp-' + side + '-status';
     status.textContent = '(not loaded)';
 
+    var projectAc = createProjectAutocomplete({
+      idPrefix: 'iv-cmp-' + side + '-project',
+      storageKey: 'ivCmpLastProject_' + side,
+      smallInput: true,
+      placeholder: 'Project (optional)',
+      onChange: function () { if (ac) ac.clear(); }
+    });
+
     var ac = createIntegrationAutocomplete({
       idPrefix: 'iv-cmp-' + side,
       storageKey: 'ivCmpLast_' + side,
       placeholder: 'Search integrations by name or code…',
+      getProjectCode: function () {
+        var p = projectAc.getSelection();
+        return p && p.code ? p.code : null;
+      },
       onSubmit: function () { liveBtn.click(); }
     });
 
@@ -3118,11 +3624,17 @@
         return;
       }
       ac.persist();
+      projectAc.persist();
+      var proj = projectAc.getSelection();
+      var pc = sel.projectCode || (proj && proj.code) || null;
       setComparePI(side, 'Downloading…');
       liveBtn.disabled = true;
-      fetchArchive(sel.code, sel.version)
+      fetchArchive(sel.code, sel.version, pc, function (msg) { setComparePI(side, msg); })
         .then(function (ab) { return processCompareArchive(side, ab); })
-        .catch(function (err) { setComparePI(side, 'Error: ' + (err.message || err)); })
+        .catch(function (err) {
+          if (err && err.cancelled) { setComparePI(side, ''); return; }
+          setComparePI(side, 'Error: ' + (err.message || err));
+        })
         .then(function () { liveBtn.disabled = false; });
     });
 
@@ -3177,6 +3689,7 @@
 
     bar.appendChild(sideLabel);
     bar.appendChild(status);
+    bar.appendChild(projectAc.element);
     bar.appendChild(ac.element);
     bar.appendChild(liveBtn);
     bar.appendChild(uploadBtn);
