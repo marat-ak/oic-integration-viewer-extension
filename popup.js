@@ -30,6 +30,20 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // True if the active tab is an OIC Integration design page that the viewer can attach to.
+  function isIntegrationPage(url) {
+    if (!url) return false;
+    try {
+      var u = new URL(url);
+      return /^design\.integration\..+\.ocp\.oraclecloud\.com$/i.test(u.hostname);
+    } catch (e) { return false; }
+  }
+
+  function showNotIntegrationError() {
+    statusEl.textContent = 'Please navigate to an OIC page first';
+    statusEl.className = 'status error';
+  }
+
   // Helper: inject content script + CSS then run a callback
   function injectAndRun(tabId, callback) {
     statusEl.textContent = 'Injecting viewer...';
@@ -59,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const tab = tabs[0];
+      if (!isIntegrationPage(tab.url)) { showNotIntegrationError(); return; }
       const msg = { type: 'iv-openEmptyViewer' };
       chrome.tabs.sendMessage(tab.id, msg, () => {
         if (chrome.runtime.lastError) {
@@ -106,6 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
           }
           const tab = tabs[0];
+          if (!isIntegrationPage(tab.url)) { showNotIntegrationError(); return; }
           const sendImport = () => {
             chrome.tabs.sendMessage(tab.id, { type: 'iv-importData', data }, () => {
               if (chrome.runtime.lastError) {
