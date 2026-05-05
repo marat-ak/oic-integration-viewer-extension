@@ -1559,6 +1559,29 @@
   color: #859900;
 }
 
+#oic-iv-fullscreen[data-theme="light"] {
+  --iv-highlight-bg: #fbbf24;
+  --iv-highlight-text: #1a1a1a;
+}
+#oic-iv-fullscreen[data-theme="dark"] {
+  --iv-highlight-bg: #fbbf24;
+  --iv-highlight-text: #0f172a;
+}
+#oic-iv-fullscreen[data-theme="high-contrast"] {
+  --iv-highlight-bg: #facc15;
+  --iv-highlight-text: #000000;
+}
+#oic-iv-fullscreen[data-theme="solarized"] {
+  --iv-highlight-bg: #b58900;
+  --iv-highlight-text: #fdf6e3;
+}
+#oic-iv-fullscreen .iv-search-match {
+  background: var(--iv-highlight-bg, #fbbf24);
+  color: var(--iv-highlight-text, #1a1a1a);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 /* ──────────────────────────────────────────────────────────────────────
    Compare overlay — Table view mode
    ────────────────────────────────────────────────────────────────────── */

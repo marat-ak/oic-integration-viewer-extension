@@ -1849,8 +1849,19 @@
     body.className = 'iv-fs-body';
     body.textContent = content;
 
+    function applyFsHighlights() {
+      clearHighlights(body);
+      var si = document.getElementById('iv-search-input');
+      var q = si ? si.value.trim().toLowerCase() : '';
+      if (q) highlightMatches(body, q);
+    }
+    var searchInputForFs = document.getElementById('iv-search-input');
+    var fsSearchListener = debounce(applyFsHighlights, 200);
+    if (searchInputForFs) searchInputForFs.addEventListener('input', fsSearchListener);
+
     function closeFs() {
       document.removeEventListener('keydown', escHandler);
+      if (searchInputForFs) searchInputForFs.removeEventListener('input', fsSearchListener);
       fs.remove();
     }
     function escHandler(e) {
@@ -1879,6 +1890,7 @@
     fs.appendChild(header);
     fs.appendChild(body);
     document.body.appendChild(fs);
+    applyFsHighlights();
   }
 
   function onKeyDown(e) {
@@ -3232,7 +3244,11 @@
       '    var title = document.createElement("span"); title.className = "iv-fs-title"; title.textContent = path;\n' +
       '    var closeBtn = document.createElement("button"); closeBtn.className = "iv-fs-close"; closeBtn.textContent = "\u2715 Close";\n' +
       '    var body = document.createElement("pre"); body.className = "iv-fs-body"; body.textContent = content;\n' +
-      '    function closeFs() { document.removeEventListener("keydown", escH); fs.remove(); }\n' +
+      '    function applyFsHighlights() { clearHighlights(body); var si = document.getElementById("iv-search-input"); var q = si ? si.value.trim().toLowerCase() : ""; if (q) highlightMatches(body, q); }\n' +
+      '    var searchInputForFs = document.getElementById("iv-search-input");\n' +
+      '    var fsSearchListener = debounce(applyFsHighlights, 200);\n' +
+      '    if (searchInputForFs) searchInputForFs.addEventListener("input", fsSearchListener);\n' +
+      '    function closeFs() { document.removeEventListener("keydown", escH); if (searchInputForFs) searchInputForFs.removeEventListener("input", fsSearchListener); fs.remove(); }\n' +
       '    function escH(e) { if (e.key === "Escape") { e.stopPropagation(); closeFs(); } }\n' +
       '    closeBtn.addEventListener("click", closeFs);\n' +
       '    document.addEventListener("keydown", escH);\n' +
@@ -3241,6 +3257,7 @@
       '    header.appendChild(title); header.appendChild(copyBtn); header.appendChild(dlBtn); header.appendChild(closeBtn);\n' +
       '    fs.appendChild(header); fs.appendChild(body);\n' +
       '    document.body.appendChild(fs);\n' +
+      '    applyFsHighlights();\n' +
       '  }\n' +
       '\n' +
       '  renderTree();\n' +
