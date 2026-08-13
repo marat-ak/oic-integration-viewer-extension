@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OIC Integration Viewer",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "description": "Alternate viewer for Oracle Integration Cloud integration blueprints with interactive tree, search, filter, and export",
   "permissions": [
     "activeTab",
@@ -25,6 +25,7 @@
       ],
       "js": [
         "jszip.min.js",
+        "iv-core.js",
         "content.js"
       ],
       "css": [
